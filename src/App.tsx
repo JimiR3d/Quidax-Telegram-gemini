@@ -111,8 +111,8 @@ export default function App() {
         setCommunities(data);
         if (!selectedCommunity) setSelectedCommunity(data[0].telegram_group_id);
       }
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      if (e?.message !== "Failed to fetch") console.error(e);
     }
   };
 
@@ -124,8 +124,8 @@ export default function App() {
       if (Array.isArray(data)) {
         setTickets(data);
       }
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      if (e?.message !== "Failed to fetch") console.error(e);
     } finally {
       setLoading(false);
     }
@@ -139,8 +139,8 @@ export default function App() {
       });
       // Optimistic update
       setTickets(prev => prev.map(t => t.id === id ? { ...t, status: newStatus as any } : t));
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      if (e?.message !== "Failed to fetch") console.error(e);
       alert("Failed to update status");
     }
   };
@@ -175,7 +175,7 @@ export default function App() {
         alert("Error ingesting: " + data.error);
       }
     } catch (e: any) {
-      console.error(e);
+      if (e?.message !== "Failed to fetch") console.error(e);
       alert("Failed to reach ingestion API. Make sure the backend server is running.");
     }
     setIsSimulating(false);
@@ -197,7 +197,7 @@ export default function App() {
         setBackfillStatus({ message: "Error during backfill: " + data.error, isError: true });
       }
     } catch (e: any) {
-      console.error(e);
+      if (e?.message !== "Failed to fetch") console.error(e);
       setBackfillStatus({ message: "Failed to reach backfill API. Ensure backend is running and Telegram is connected.", isError: true });
     }
     setIsBackfilling(false);
