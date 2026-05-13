@@ -1,0 +1,6 @@
+{
+  "name": "PulseDesk Community Intelligence",
+  "description": "A community intelligence platform that listens to Telegram groups, classifies messages using Gemini, and structures support intelligence tickets in a dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
