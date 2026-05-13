@@ -1,30 +1,63 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type, Schema } from "@google/genai";
+import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 import dotenv from "dotenv";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  
+  // Trust the reverse proxy (Cloud Run / AI Studio) to correctly pass the client's IP
+  app.set("trust proxy", 1);
 
-  app.use(express.json());
+  // --- Security Middleware ---
+  app.use(helmet({ contentSecurityPolicy: false })); // Disabled CSP because it can conflict with Vite HMR/dev
+  app.use(express.json({ limit: "50kb" })); // Defend against payload injection
 
-  // Initialize Gemini
-  let ai: GoogleGenAI;
-  try {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key || key === 'MY_GEMINI_API_KEY') {
-      console.warn("⚠️ Warning: GEMINI_API_KEY is missing or invalid. Check AI Studio Secrets panel.");
-      throw new Error("GEMINI_API_KEY missing or invalid");
+  // Rate Limiting to prevent brute-forcing and API abuse
+  const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 200, 
+    message: { error: "Too many requests from this IP, please try again later." },
+    validate: { 
+      trustProxy: false, // We already explicitly trust proxy, this suppresses the warning if it still gets triggered unexpectedly
+      xForwardedForHeader: false // express doesn't natively support Forwarded header, suppress warning
+    } 
+  });
+  app.use("/api/", limiter);
+
+  // Simple Auth Middleware
+  const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // Basic shared secret for MVP Dashboard protection
+    const incomingKey = req.headers['x-admin-key'];
+    const validKey = process.env.VITE_DASHBOARD_PASSWORD || 'quidax2026';
+    if (incomingKey !== validKey) {
+      return res.status(401).json({ error: "Unauthorized. Invalid Admin Key." });
     }
-    ai = new GoogleGenAI({ apiKey: key });
+    next();
+  };
+
+  // Initialize OpenAI for Groq
+  let openai: OpenAI;
+  try {
+    const key = process.env.GROQ_API_KEY;
+    if (!key || key === 'MY_GROQ_API_KEY') {
+      console.warn("⚠️ Warning: GROQ_API_KEY is missing or invalid. Check AI Studio Settings -> Secrets panel.");
+    } else {
+      openai = new OpenAI({
+        apiKey: key,
+        baseURL: "https://api.groq.com/openai/v1",
+      });
+    }
   } catch (err) {
-    console.error("Gemini init error:", err);
+    console.error("OpenAI init error:", err);
   }
 
   // Initialize Supabase lazily
@@ -35,40 +68,47 @@ async function startServer() {
     return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
   }
 
-  // Define schema for Gemini
-  const responseSchema: Schema = {
-    type: Type.OBJECT,
-    properties: {
-      category: {
-        type: Type.STRING,
-        description: "The primary issue type. Must be exactly one of: 'Withdrawal Issue', 'Deposit Issue', 'KYC/Verification', 'Trading Problem', 'App Bug', 'Fee Complaint', 'Account Access', 'Network/Downtime', 'General Question', 'Praise', 'Spam/Irrelevant'.",
-      },
-      urgency: {
-        type: Type.STRING,
-        description: "Urgency level: 'Critical', 'High', 'Medium', 'Low'. Based on keywords, financial stakes, and user tone.",
-      },
-      product_area: {
-        type: Type.STRING,
-        description: "The affected product area: 'Wallet', 'Exchange', 'Mobile App', 'Web Platform', 'Identity/KYC', 'Customer Support', 'Other'.",
-      },
-      sentiment: {
-        type: Type.STRING,
-        description: "User sentiment: 'Frustrated', 'Neutral', 'Positive', 'Confused'.",
-      },
-      is_complaint: {
-        type: Type.BOOLEAN,
-        description: "True if the message is a complaint or problem report. False if it is a question, praise, or off-topic.",
-      },
-      suggested_action: {
-        type: Type.STRING,
-        description: "A brief one-line recommendation: e.g. 'Escalate to on-call engineering'.",
-      },
-      summary: {
-        type: Type.STRING,
-        description: "A one-sentence plain-English summary of the issue suitable for a support ticket title.",
+  // Define schema for structured JSON output
+  const responseSchema = {
+    type: "json_schema",
+    json_schema: {
+      name: "ticket_classification",
+      schema: {
+        type: "object",
+        properties: {
+          category: {
+            type: "string",
+            description: "The primary issue type. Must be exactly one of: 'Withdrawal Issue', 'Deposit Issue', 'KYC/Verification', 'Trading Problem', 'App Bug', 'Fee Complaint', 'Account Access', 'Network/Downtime', 'General Question', 'Praise', 'Spam/Irrelevant'.",
+          },
+          urgency: {
+            type: "string",
+            description: "Urgency level: 'Critical', 'High', 'Medium', 'Low'. Based on keywords, financial stakes, and user tone.",
+          },
+          product_area: {
+            type: "string",
+            description: "The affected product area: 'Wallet', 'Exchange', 'Mobile App', 'Web Platform', 'Identity/KYC', 'Customer Support', 'Other'.",
+          },
+          sentiment: {
+            type: "string",
+            description: "User sentiment: 'Frustrated', 'Neutral', 'Positive', 'Confused'.",
+          },
+          is_complaint: {
+            type: "boolean",
+            description: "True if the message is a complaint or problem report. False if it is a question, praise, or off-topic.",
+          },
+          suggested_action: {
+            type: "string",
+            description: "A brief one-line recommendation: e.g. 'Escalate to on-call engineering'.",
+          },
+          summary: {
+            type: "string",
+            description: "A one-sentence plain-English summary of the issue suitable for a support ticket title.",
+          }
+        },
+        required: ["category", "urgency", "product_area", "sentiment", "is_complaint", "suggested_action", "summary"],
+        additionalProperties: false
       }
-    },
-    required: ["category", "urgency", "product_area", "sentiment", "is_complaint", "suggested_action", "summary"]
+    }
   };
 
   // API constraints checker to validate schema enums
@@ -91,25 +131,49 @@ async function startServer() {
     }
   }
 
-  async function processAndIngestMessage(text: string, telegramId: number, groupId: string) {
+  async function processAndIngestMessage(text: string, telegramId: number, groupId: string, replyToMsgId?: number) {
     if (!text || text.length < 5) {
        throw new Error("Message too short or empty");
     }
     const supabase = getSupabase();
-    
-    const systemInstruction = `You are a support triage analyst for a fintech/crypto company. Follow these instructions exactly. Classify the user's message.`;
-    
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-pro-preview",
-      contents: text,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema
+
+    if (replyToMsgId) {
+      try {
+        const { data: parentMsg } = await supabase.from('messages').select('id').eq('telegram_message_id', String(replyToMsgId)).single();
+        if (parentMsg) {
+          const { data: parentTicket } = await supabase.from('tickets').select('*').eq('message_id', parentMsg.id).single();
+          if (parentTicket) {
+             const newRawText = parentTicket.raw_text + `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+             await supabase.from('tickets').update({
+                raw_text: newRawText,
+                status: 'In Review'
+             }).eq('id', parentTicket.id);
+             console.log(`[Admin Reply] Attached reply to ticket ${parentTicket.id}`);
+             return parentTicket;
+          }
+        }
+      } catch (err) {
+        console.error("Error looking up parent ticket for reply:", err);
       }
+    }
+
+    if (!openai) {
+      throw new Error("GROQ_API_KEY is missing. Please add it to Secrets.");
+    }
+    
+    const systemInstruction = `You are a support triage analyst for a fintech/crypto company. Follow these instructions exactly. Classify the user's message. You must reply with a valid JSON payload matching the target schema.`;
+    
+    // Call Groq API
+    const response = await openai.chat.completions.create({
+      model: "llama-3.3-70b-versatile", // Fast and capable Groq model
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: `Please classify this message: "${text}"\n\nEnsure your response strictly follows this JSON schema structure:\n${JSON.stringify(responseSchema.json_schema.schema)}` }
+      ],
+      response_format: { type: "json_object" }
     });
 
-    const jsonStr = response.text?.trim() || "{}";
+    const jsonStr = response.choices[0]?.message?.content?.trim() || "{}";
     const ticketData = validateTicketSchema(jsonStr);
 
     if (!ticketData) {
@@ -204,7 +268,8 @@ async function startServer() {
             const chat = await message.getChat();
             if (chat && (chat.username === targetGroup || chat.title?.includes(targetGroup))) {
               console.log(`[Telegram Listener] Received message in ${targetGroup}: ${text.substring(0, 50)}...`);
-              await processAndIngestMessage(text, message.id || Math.floor(Math.random() * 10000000), targetGroup);
+              const replyToMsgId = message.replyTo?.replyToMsgId || message.replyToMsgId;
+              await processAndIngestMessage(text, message.id || Math.floor(Math.random() * 10000000), targetGroup, replyToMsgId);
             }
           } catch (e) {
             console.error("[Telegram Listener] Error processing live message:", e);
@@ -225,7 +290,55 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
-  app.post("/api/backfill", async (req, res) => {
+  // Simple Auth check endpoint
+  app.get("/api/auth/verify", requireAuth, (req, res) => {
+    res.json({ success: true });
+  });
+
+  // REST endpoints for the frontend
+  app.get("/api/communities", requireAuth, async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase.from('communities').select('*');
+      if (error) throw error;
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/tickets", requireAuth, async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const groupId = req.query.group_id as string;
+      
+      let query = supabase.from('tickets').select('*').order('created_at', { ascending: false }).limit(200);
+      if (groupId) {
+        query = query.eq('group_id', groupId);
+      }
+      const { data, error } = await query;
+      if (error) throw error;
+      res.json(data);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/tickets/:id/status", requireAuth, async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const ticketId = req.params.id;
+      const { status } = req.body;
+      
+      const { error } = await supabase.from('tickets').update({ status }).eq('id', ticketId);
+      if (error) throw error;
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/backfill", requireAuth, async (req, res) => {
     try {
       const limit = Number(req.body.limit) || 20;
       const targetGroup = process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
@@ -256,7 +369,8 @@ async function startServer() {
         try {
           // Process sequentially to be safe
           const id = msg.id || Math.floor(Math.random() * 10000000);
-          const ticket = await processAndIngestMessage(text, id, targetGroup);
+          const replyToMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
+          const ticket = await processAndIngestMessage(text, id, targetGroup, replyToMsgId);
           if (ticket) {
             processedCount++;
           } else {
@@ -265,8 +379,8 @@ async function startServer() {
         } catch (e: any) {
           console.error(`[Backfill] Error on msg ${msg.id}:`, e.message || e);
           skippedCount++;
-          if (e.message && e.message.includes("API key not valid")) {
-            return res.status(400).json({ error: "Invalid Gemini API Key. Please check your AI Studio Secrets panel." });
+          if (e.message && (e.message.includes("API key not valid") || e.message.includes("401"))) {
+            return res.status(400).json({ error: "Invalid Groq API Key. Please check your AI Studio Secrets panel." });
           }
         }
       }
@@ -279,7 +393,7 @@ async function startServer() {
   });
 
   // Endpoint to simulate a webhook for ingesting a new telegram message
-  app.post("/api/ingest", async (req, res) => {
+  app.post("/api/ingest", requireAuth, async (req, res) => {
     try {
       const { text, telegramId } = req.body;
       const tId = telegramId || Math.floor(Math.random() * 10000000);

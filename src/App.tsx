@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from "react";
-import { supabase } from "./lib/supabase";
+import React, { useEffect, useState, useRef } from "react";
 import { format, subDays, startOfDay, isToday, parseISO } from "date-fns";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
-import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock } from "lucide-react";
 
 // Types
 type Ticket = {
@@ -30,82 +29,152 @@ const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#f43f5e', '#8b5cf6', '#ec4899'
 const URGENCY_COLORS = { Critical: 'bg-rose-500', High: 'bg-amber-500', Medium: 'bg-indigo-500', Low: 'bg-blue-500' };
 
 export default function App() {
+  const [adminKey, setAdminKey] = useState<string>(localStorage.getItem('PULSEDESK_ADMIN_KEY') || "");
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(!!localStorage.getItem('PULSEDESK_ADMIN_KEY'));
+  const [authError, setAuthError] = useState<string>("");
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [communities, setCommunities] = useState<Community[]>([]);
   const [selectedCommunity, setSelectedCommunity] = useState<string>("");
   const [loading, setLoading] = useState(true);
-  const [configMissing, setConfigMissing] = useState(false);
   
   // Simulator state
   const [simMessage, setSimMessage] = useState("");
   const [isSimulating, setIsSimulating] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
+  const [backfillStatus, setBackfillStatus] = useState<{message: string, isError: boolean} | null>(null);
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Check config
-    if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY) {
-      setConfigMissing(true);
-      return;
+  // Filters state
+  const [filterCategory, setFilterCategory] = useState<string>("All");
+  const [filterUrgency, setFilterUrgency] = useState<string>("All");
+  const [filterStatus, setFilterStatus] = useState<string>("All");
+  const [filterDays, setFilterDays] = useState<string>("7");
+
+  // Custom api abstraction to handle headers easily
+  const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
+    const res = await fetch(endpoint, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-key': adminKey,
+        ...(options.headers || {})
+      }
+    });
+    if (res.status === 401) {
+      setIsAuthenticated(false);
+      localStorage.removeItem('PULSEDESK_ADMIN_KEY');
+      throw new Error("Unauthorized");
     }
+    return res;
+  };
 
-    fetchCommunities();
+  const verifyLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!adminKey.trim()) return;
+    setAuthLoading(true);
+    setAuthError("");
+    try {
+      const res = await fetch('/api/auth/verify', { headers: { 'x-admin-key': adminKey } });
+      if (res.ok) {
+        setIsAuthenticated(true);
+        localStorage.setItem('PULSEDESK_ADMIN_KEY', adminKey);
+      } else {
+        setAuthError("Invalid access key");
+      }
+    } catch {
+      setAuthError("Network error. Make sure the backend is running.");
+    }
+    setAuthLoading(false);
+  };
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchCommunities();
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
     fetchTickets();
-
-    // Set up Supabase Realtime
-    const subscription = supabase
-      .channel('public:tickets')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, (payload) => {
-         // Re-fetch to keep it simple, or update state optimistically
-         fetchTickets();
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(subscription);
-    };
-  }, [selectedCommunity]);
+    // Poll for new tickets since we moved away from client-side supabase realtime
+    const interval = setInterval(fetchTickets, 5000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, selectedCommunity]);
 
   const fetchCommunities = async () => {
-    const { data } = await supabase.from('communities').select('*');
-    if (data && data.length > 0) {
-      setCommunities(data);
-      if (!selectedCommunity) setSelectedCommunity(data[0].telegram_group_id);
+    try {
+      const res = await apiFetch('/api/communities');
+      const data = await res.json();
+      if (data && data.length > 0) {
+        setCommunities(data);
+        if (!selectedCommunity) setSelectedCommunity(data[0].telegram_group_id);
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
   const fetchTickets = async () => {
-    let query = supabase.from('tickets').select('*').order('created_at', { ascending: false }).limit(200);
-    if (selectedCommunity) {
-      // In MVP the group_id field holds the telegram_group_id string
-      query = query.eq('group_id', selectedCommunity);
+    try {
+      const url = selectedCommunity ? `/api/tickets?group_id=${encodeURIComponent(selectedCommunity)}` : '/api/tickets';
+      const res = await apiFetch(url);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setTickets(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
     }
-    const { data, error } = await query;
-    if (error) console.error("Error fetching tickets:", error);
-    if (data) setTickets(data);
-    setLoading(false);
   };
 
   const updateTicketStatus = async (id: string, newStatus: string) => {
-    await supabase.from('tickets').update({ status: newStatus }).eq('id', id);
+    try {
+      await apiFetch(`/api/tickets/${id}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status: newStatus })
+      });
+      // Optimistic update
+      setTickets(prev => prev.map(t => t.id === id ? { ...t, status: newStatus as any } : t));
+    } catch (e) {
+      console.error(e);
+      alert("Failed to update status");
+    }
   };
+
+  // Derivative calculations
+  const filteredTickets = tickets.filter(t => {
+    if (filterCategory !== "All" && t.category?.trim().toLowerCase() !== filterCategory.toLowerCase()) return false;
+    if (filterUrgency !== "All" && t.urgency?.trim().toLowerCase() !== filterUrgency.toLowerCase()) return false;
+    if (filterStatus !== "All" && t.status?.trim().toLowerCase() !== filterStatus.toLowerCase()) return false;
+    
+    if (filterDays !== "All") {
+      const days = parseInt(filterDays);
+      const thresholdDate = subDays(startOfDay(new Date()), days - 1);
+      if (t.created_at && parseISO(t.created_at) < thresholdDate) return false;
+    }
+    return true;
+  });
 
   const simulateIngestion = async () => {
     if (!simMessage.trim()) return;
     setIsSimulating(true);
     try {
-      const res = await fetch('/api/ingest', {
+      const res = await apiFetch('/api/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: simMessage, telegramId: Math.floor(Math.random() * 999999) })
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         setSimMessage("");
+        fetchTickets(); // fetch latest
       } else {
         alert("Error ingesting: " + data.error);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
       alert("Failed to reach ingestion API. Make sure the backend server is running.");
     }
@@ -114,66 +183,85 @@ export default function App() {
 
   const handleBackfill = async () => {
     setIsBackfilling(true);
+    setBackfillStatus(null);
     try {
-      const res = await fetch('/api/backfill', {
+      const res = await apiFetch('/api/backfill', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ limit: 20 })
       });
       const data = await res.json();
-      if (data.success) {
-        alert(`Backfill complete: Processed ${data.processed} messages, skipped ${data.skipped}.`);
+      if (res.ok && data.success) {
+        setBackfillStatus({ message: `Backfill complete: Processed ${data.processed} messages, skipped ${data.skipped}.`, isError: false });
+        fetchTickets(); // fetch latest
       } else {
-        alert("Error during backfill: " + data.error);
+        setBackfillStatus({ message: "Error during backfill: " + data.error, isError: true });
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert("Failed to reach backfill API. Ensure backend is running and Telegram is connected.");
+      setBackfillStatus({ message: "Failed to reach backfill API. Ensure backend is running and Telegram is connected.", isError: true });
     }
     setIsBackfilling(false);
   };
 
-  if (configMissing) {
+  // Render Auth Screen Instead of Config Missing Screen
+  if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden">
         <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none"></div>
         <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none"></div>
-        <div className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-lg w-full relative z-10">
-          <div className="flex items-center space-x-3 mb-6">
-             <AlertTriangle className="text-amber-500 w-8 h-8" />
-             <h1 className="text-2xl font-bold">Missing Configuration</h1>
+        <form onSubmit={verifyLogin} className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-sm w-full relative z-10 flex flex-col items-center">
+          <div className="mb-6 flex justify-center w-full">
+             <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+               <Lock className="w-8 h-8 text-white" />
+             </div>
           </div>
-          <p className="mb-4 text-white/80">PulseDesk requires Supabase credentials to function.</p>
-          <p className="mb-4 text-sm text-white/60">Please open the <strong>Settings &gt; Secrets</strong> panel in AI Studio and add the following variables:</p>
-          <ul className="list-disc pl-5 mb-6 text-sm font-mono text-indigo-300 space-y-2">
-            <li>SUPABASE_URL</li>
-            <li>SUPABASE_ANON_KEY</li>
-          </ul>
-          <p className="text-sm text-white/80">After adding the keys, <strong className="text-emerald-400">restart the app</strong>.</p>
-        </div>
+          <h1 className="text-xl font-bold tracking-tight mb-6 text-center w-full">Secure Access Required</h1>
+          
+          <div className="w-full space-y-4">
+             <input 
+               type="password"
+               value={adminKey}
+               onChange={e => setAdminKey(e.target.value)}
+               placeholder="Access Key"
+               className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-center tracking-widest font-mono"
+             />
+             {authError && <div className="text-rose-400 text-xs text-center">{authError}</div>}
+             <button type="submit" disabled={authLoading || !adminKey.trim()} className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold rounded-lg px-4 py-3 text-sm transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50">
+               {authLoading ? "Verifying..." : "Unlock Dashboard"}
+             </button>
+          </div>
+        </form>
       </div>
     );
   }
 
   // Calculate stats
-  const ticketsToday = tickets.filter(t => isToday(parseISO(t.created_at)));
-  const openCount = tickets.filter(t => t.status === 'Open').length;
-  const resolvedCount = tickets.filter(t => t.status === 'Resolved').length;
-  const criticalHighCount = tickets.filter(t => ['Critical', 'High'].includes(t.urgency) && t.status !== 'Resolved' && t.status !== 'Dismissed').length;
-  const resolutionRate = tickets.length ? Math.round((resolvedCount / tickets.length) * 100) : 0;
+  const ticketsToday = filteredTickets.filter(t => isToday(parseISO(t.created_at)));
+  const openCount = filteredTickets.filter(t => t.status === 'Open').length;
+  const resolvedCount = filteredTickets.filter(t => t.status === 'Resolved').length;
+  
+  // Dynamic urgency count for the 4th stat box
+  const urgencyCardLabel = filterUrgency === 'All' ? 'Critical Issues' : `${filterUrgency} Issues`;
+  const urgencyCount = filteredTickets.filter(t => {
+    const targetUrgencies = filterUrgency === 'All' ? ['Critical'] : [filterUrgency];
+    return targetUrgencies.includes(t.urgency) && t.status !== 'Resolved' && t.status !== 'Dismissed';
+  }).length;
+  
+  const resolutionRate = filteredTickets.length ? Math.round((resolvedCount / filteredTickets.length) * 100) : 0;
 
-  // Chart Data: Volume over last 7 days
-  const volumeData = Array.from({length: 7}).map((_, i) => {
-    const d = subDays(new Date(), 6 - i);
+  // Chart Data: Volume over time
+  const maxDays = filterDays === "All" ? 30 : parseInt(filterDays);
+  const volumeData = Array.from({length: maxDays}).map((_, i) => {
+    const d = subDays(new Date(), (maxDays - 1) - i);
     const dateStr = format(d, 'MMM dd');
     return {
       date: dateStr,
-      tickets: tickets.filter(t => format(parseISO(t.created_at), 'MMM dd') === dateStr).length
+      tickets: filteredTickets.filter(t => t.created_at && format(parseISO(t.created_at), 'MMM dd') === dateStr).length
     };
   });
 
   // Chart Data: Category Breakdown
-  const categoryCount = tickets.reduce((acc, t) => {
+  const categoryCount = filteredTickets.reduce((acc, t) => {
     acc[t.category] = (acc[t.category] || 0) + 1;
     return acc;
   }, {} as Record<string, number>);
@@ -233,7 +321,7 @@ export default function App() {
                  Fetch Last 20 Messages
                </button>
              </div>
-             <div className="flex space-x-3">
+             <div className="flex space-x-3 mb-3">
                <input 
                  type="text" 
                  value={simMessage}
@@ -250,6 +338,64 @@ export default function App() {
                  {isSimulating ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <><Send className="w-4 h-4 mr-2" /> Classify</>}
                </button>
              </div>
+             {backfillStatus && (
+               <div className={`p-3 mt-4 rounded-lg text-sm flex items-center ${backfillStatus.isError ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}`}>
+                 {backfillStatus.isError ? <AlertTriangle className="w-4 h-4 mr-2 flex-shrink-0" /> : <RefreshCcw className="w-4 h-4 mr-2 flex-shrink-0" />}
+                 {backfillStatus.message}
+               </div>
+             )}
+          </div>
+
+          {/* Filters Row */}
+          <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-4 flex flex-wrap gap-4 items-center mb-6">
+            <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest mr-2">Filters</h2>
+            
+            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+              <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterDays} onChange={e => setFilterDays(e.target.value)}>
+                <option value="All">All Time</option>
+                <option value="1">Last 24h</option>
+                <option value="7">Last 7 Days</option>
+                <option value="30">Last 30 Days</option>
+              </select>
+            </div>
+
+            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+              <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
+                <option value="All">All Statuses</option>
+                <option value="Open">Open</option>
+                <option value="In Review">In Review</option>
+                <option value="Resolved">Resolved</option>
+                <option value="Dismissed">Dismissed</option>
+              </select>
+            </div>
+
+            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+              <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterUrgency} onChange={e => setFilterUrgency(e.target.value)}>
+                <option value="All">All Urgency</option>
+                <option value="Critical">Critical</option>
+                <option value="High">High</option>
+                <option value="Medium">Medium</option>
+                <option value="Low">Low</option>
+              </select>
+            </div>
+            
+            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+              <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
+                <option value="All">All Categories</option>
+                {Array.from(new Set(tickets.map(t => t.category))).map(cat => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+            </div>
+            
+            {(filterDays !== "7" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All") && (
+              <button 
+                onClick={() => { setFilterDays("7"); setFilterStatus("All"); setFilterUrgency("All"); setFilterCategory("All"); }}
+                className="text-xs text-indigo-400 hover:text-indigo-300 ml-auto transition"
+              >
+                Clear Filters
+              </button>
+            )}
           </div>
 
           {/* Stats Row */}
@@ -273,12 +419,12 @@ export default function App() {
             </div>
             <div className="bg-rose-500/10 border border-rose-500/20 p-4 rounded-2xl backdrop-blur-xl">
               <div className="flex items-center justify-between mb-1">
-                <p className="text-[10px] uppercase tracking-wider text-rose-400 font-semibold">Critical & High</p>
-                <AlertTriangle className={`w-4 h-4 ${criticalHighCount > 0 ? 'text-rose-500' : 'text-rose-500/40'}`} />
+                <p className="text-[10px] uppercase tracking-wider text-rose-400 font-semibold">{urgencyCardLabel}</p>
+                <AlertTriangle className={`w-4 h-4 ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/40'}`} />
               </div>
               <div className="flex items-end justify-between">
-                 <span className={`text-2xl font-bold ${criticalHighCount > 0 ? 'text-rose-500' : 'text-rose-500/80'}`}>{criticalHighCount}</span>
-                 {criticalHighCount > 0 && <span className="bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded uppercase font-bold mb-1">Urgent</span>}
+                 <span className={`text-2xl font-bold ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/80'}`}>{urgencyCount}</span>
+                 {urgencyCount > 0 && <span className="bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded uppercase font-bold mb-1">Urgent</span>}
               </div>
             </div>
           </div>
@@ -287,7 +433,7 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="bg-white/5 border border-white/10 p-5 rounded-2xl backdrop-blur-xl col-span-2 flex flex-col">
               <div className="flex justify-between items-center mb-6">
-                <h3 className="text-sm font-semibold text-white/80">Issue Volume (7 Days)</h3>
+                <h3 className="text-sm font-semibold text-white/80">Issue Volume ({filterDays === "All" ? "30 Days (Max)" : `${filterDays} Days`})</h3>
               </div>
               <div className="h-64 flex-1">
                 <ResponsiveContainer width="100%" height="100%">
@@ -304,7 +450,7 @@ export default function App() {
             <div className="bg-white/5 border border-white/10 p-5 rounded-2xl backdrop-blur-xl flex flex-col">
               <h3 className="text-sm font-semibold text-white/80 mb-2">Category Breakdown</h3>
               <div className="flex-1 flex items-center justify-center">
-                {tickets.length === 0 ? (
+                {filteredTickets.length === 0 ? (
                   <div className="text-white/40 text-sm">No data yet</div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
@@ -351,10 +497,10 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="text-sm">
-                  {tickets.length === 0 ? (
-                    <tr><td colSpan={5} className="px-5 py-8 text-center text-white/40">No tickets found. Use the simulation box above to ingest some!</td></tr>
+                  {filteredTickets.length === 0 ? (
+                    <tr><td colSpan={5} className="px-5 py-8 text-center text-white/40">No tickets found matching current filters.</td></tr>
                   ) : (
-                    tickets.map(ticket => (
+                    filteredTickets.map(ticket => (
                       <React.Fragment key={ticket.id}>
                         <tr 
                           className={`border-b border-white/5 hover:bg-white/5 cursor-pointer transition ${ticket.urgency === 'Critical' ? 'bg-rose-500/5' : ''}`}
@@ -400,8 +546,23 @@ export default function App() {
                                 <div>
                                   <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Original Telegram Message</div>
                                   <div className="bg-white/5 p-4 rounded-xl border border-white/10 text-white/80 text-sm whitespace-pre-wrap leading-relaxed">
-                                    "{ticket.raw_text}"
+                                    "{ticket.raw_text.split('[ADMIN_REPLY]')[0].trim()}"
                                   </div>
+                                  
+                                  {ticket.raw_text.includes('[ADMIN_REPLY]') && (
+                                    <div className="mt-4">
+                                      <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-2 flex items-center">
+                                        <CheckCircle className="w-3 h-3 mr-1" /> Admin / Team Responses
+                                      </div>
+                                      <div className="space-y-2">
+                                        {ticket.raw_text.split('[ADMIN_REPLY]').slice(1).map((replyBlock, idx) => (
+                                          <div key={idx} className="bg-emerald-500/10 p-3 rounded-xl border border-emerald-500/20 text-emerald-100 text-sm whitespace-pre-wrap">
+                                            {replyBlock.replace('[/ADMIN_REPLY]', '').trim()}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                                 <div className="space-y-4">
                                   <div>
