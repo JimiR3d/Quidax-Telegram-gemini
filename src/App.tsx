@@ -75,18 +75,33 @@ export default function App() {
     if (!adminKey.trim()) return;
     setAuthLoading(true);
     setAuthError("");
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+    
     try {
-      const res = await fetch('/api/auth/verify', { headers: { 'x-admin-key': adminKey } });
+      const res = await fetch('/api/auth/verify', { 
+        headers: { 'x-admin-key': adminKey },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
       if (res.ok) {
         setIsAuthenticated(true);
         localStorage.setItem('PULSEDESK_ADMIN_KEY', adminKey);
       } else {
-        setAuthError("Invalid access key");
+        setAuthError("Invalid access key or Insufficient Permissions");
       }
-    } catch {
-      setAuthError("Network error. Make sure the backend is running.");
+    } catch (e: any) {
+      clearTimeout(timeoutId);
+      if (e.name === 'AbortError') {
+        setAuthError("Request timed out. Please check your connection.");
+      } else {
+        setAuthError("Network error. Make sure the backend is running.");
+      }
+    } finally {
+      setAuthLoading(false);
     }
-    setAuthLoading(false);
   };
 
   useEffect(() => {

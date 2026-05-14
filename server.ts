@@ -33,16 +33,45 @@ async function startServer() {
   });
   app.use("/api/", limiter);
 
-  // Simple Auth Middleware
+  // Map api keys to roles and tenants (simulating a database/JWT for now without breaking frontend purely)
+  const getAuthContext = (req: express.Request) => {
+    const key = req.headers['x-admin-key'] as string;
+    const adminKey = process.env.VITE_DASHBOARD_PASSWORD || 'quidax2026';
+    
+    // Hardcoded roles mapping for security fix demonstration
+    if (key === adminKey) return { role: 'super_admin', tenantId: null, userId: 'sys_admin' };
+    if (key === 'support2026') return { role: 'support', tenantId: 'OfficialQuidaxCommunity', userId: 'support_user_1' };
+    
+    return null;
+  };
+
+  // Robust Auth Middleware with RBAC concepts
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    // Basic shared secret for MVP Dashboard protection
-    const incomingKey = req.headers['x-admin-key'];
-    const validKey = process.env.VITE_DASHBOARD_PASSWORD || 'quidax2026';
-    if (incomingKey !== validKey) {
-      return res.status(401).json({ error: "Unauthorized. Invalid Admin Key." });
+    const authContext = getAuthContext(req);
+    if (!authContext) {
+      return res.status(401).json({ error: "Unauthorized. Invalid access token/key." });
     }
+    // Stash user context in request
+    (req as any).user = authContext;
     next();
   };
+
+  // Audit Log helper
+  async function logAuditAction(supabase: any, actorId: string, action: string, target: string, oldState: any, newState: any, ip: string) {
+    try {
+      await supabase.from('audit_logs').insert({
+        actor_id: actorId,
+        action,
+        target_resource: target,
+        previous_state: oldState,
+        new_state: newState,
+        ip_address: ip
+      });
+      console.log(`[AUDIT] Action: ${action} by ${actorId} on ${target}`);
+    } catch (e: any) {
+      console.warn("[AUDIT] Failed to write audit log. Ensure migration 002 is run.", e.message);
+    }
+  }
 
   // Initialize OpenAI for Groq
   let openai: OpenAI;
@@ -59,6 +88,10 @@ async function startServer() {
   } catch (err) {
     console.error("OpenAI init error:", err);
   }
+
+  // Feature flags example / Bootup checks
+  const isBeta = process.env.ENABLE_BETA_FEATURES === 'true';
+  console.log(`[SYS] Booting in ${process.env.NODE_ENV || 'production'} environment. Beta features: ${isBeta}`);
 
   // Initialize Supabase lazily
   function getSupabase() {
@@ -310,12 +343,19 @@ async function startServer() {
   app.get("/api/tickets", requireAuth, async (req, res) => {
     try {
       const supabase = getSupabase();
+      const user = (req as any).user;
       const groupId = req.query.group_id as string;
       
       let query = supabase.from('tickets').select('*').order('created_at', { ascending: false }).limit(200);
-      if (groupId) {
+      
+      // Tenant Isolation Enforcement at API layer
+      if (user.role === 'support') {
+        // Force the query to only look at their assigned tenant
+        query = query.eq('group_id', user.tenantId);
+      } else if (groupId) {
         query = query.eq('group_id', groupId);
       }
+      
       const { data, error } = await query;
       if (error) throw error;
       res.json(data);
@@ -327,11 +367,25 @@ async function startServer() {
   app.post("/api/tickets/:id/status", requireAuth, async (req, res) => {
     try {
       const supabase = getSupabase();
+      const user = (req as any).user;
       const ticketId = req.params.id;
       const { status } = req.body;
       
-      const { error } = await supabase.from('tickets').update({ status }).eq('id', ticketId);
-      if (error) throw error;
+      // Fetch previous state for audit log and tenant check
+      const { data: oldTicket, error: lookupError } = await supabase.from('tickets').select('*').eq('id', ticketId).single();
+      if (lookupError) throw lookupError;
+      
+      // Enforce Tenant Boundaries for writes
+      if (user.role !== 'super_admin' && oldTicket.group_id !== user.tenantId) {
+        return res.status(403).json({ error: "Forbidden. Ticket belongs to another tenant." });
+      }
+
+      const { error: updateError } = await supabase.from('tickets').update({ status }).eq('id', ticketId);
+      if (updateError) throw updateError;
+      
+      // Write audit log asynchronously
+      logAuditAction(supabase, user.userId, 'UPDATE_TICKET_STATUS', `ticket:${ticketId}`, { status: oldTicket.status }, { status }, req.ip || 'unknown');
+
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
