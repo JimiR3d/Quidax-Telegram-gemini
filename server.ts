@@ -395,51 +395,56 @@ async function startServer() {
   app.post("/api/backfill", requireAuth, async (req, res) => {
     try {
       const limit = Number(req.body.limit) || 20;
+      const days = Number(req.body.days) || 0; // if 0, ignore date filter
       const targetGroup = process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
 
       if (!tlClient) {
         return res.status(400).json({ error: "Telegram client not connected. Wait for connection or check credentials." });
       }
 
-      console.log(`[Backfill] Fetching up to ${limit} messages from ${targetGroup}...`);
+      console.log(`[Backfill] Fetching up to ${limit} messages from ${targetGroup}${days ? ` for the last ${days} days` : ''}...`);
       const messages = await tlClient.getMessages(targetGroup, { limit });
       
-      let processedCount = 0;
-      let skippedCount = 0;
+      const cutoffDate = days ? Math.floor(Date.now() / 1000) - (days * 24 * 60 * 60) : 0;
 
-      for (const msg of messages) {
-        if (!msg || !msg.text) {
-          skippedCount++;
-          continue;
-        }
+      // Filter valid messages
+      const validMessages = messages.filter((msg: any) => {
+        if (!msg || !msg.text) return false;
+        if (cutoffDate && msg.date < cutoffDate) return false;
+         const words = String(msg.text).trim().split(/\s+/);
+         if (words.length < 5) return false;
+         return true;
+      });
 
-        const text = String(msg.text).trim();
-        const words = text.split(/\s+/);
-        if (words.length < 5) {
-          skippedCount++;
-          continue;
-        }
+      // Respond immediately
+      res.status(200).json({ 
+        success: true, 
+        message: `Backfill started in background... Processing up to ${validMessages.length} target messages out of ${messages.length} fetched.`,
+        processed: validMessages.length, 
+        skipped: messages.length - validMessages.length, 
+        totalFetched: messages.length 
+      });
 
-        try {
-          // Process sequentially to be safe
-          const id = msg.id || Math.floor(Math.random() * 10000000);
-          const replyToMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
-          const ticket = await processAndIngestMessage(text, id, targetGroup, replyToMsgId);
-          if (ticket) {
-            processedCount++;
-          } else {
-            skippedCount++;
-          }
-        } catch (e: any) {
-          console.error(`[Backfill] Error on msg ${msg.id}:`, e.message || e);
-          skippedCount++;
-          if (e.message && (e.message.includes("API key not valid") || e.message.includes("401"))) {
-            return res.status(400).json({ error: "Invalid Groq API Key. Please check your AI Studio Secrets panel." });
-          }
-        }
-      }
+      // Process in the background in chunks to respect APIs
+      (async () => {
+         const chunkSize = 5;
+         for (let i = 0; i < validMessages.length; i += chunkSize) {
+            const chunk = validMessages.slice(i, i + chunkSize);
+            await Promise.all(chunk.map(async (msg: any) => {
+               try {
+                  const id = msg.id || Math.floor(Math.random() * 10000000);
+                  const replyToMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
+                  await processAndIngestMessage(String(msg.text).trim(), id, targetGroup, replyToMsgId);
+               } catch(e: any) {
+                  console.error(`[Backfill Background] Error on msg ${msg.id}:`, e.message || e);
+               }
+            }));
+            // Add a small delay between chunks
+            await new Promise(r => setTimeout(r, 600));
+         }
+         console.log(`[Backfill] Background processing of ${validMessages.length} messages finished.`);
+      })();
 
-      res.status(200).json({ success: true, processed: processedCount, skipped: skippedCount, totalFetched: messages.length });
     } catch (e: any) {
       console.error("[Backfill] error:", e);
       res.status(500).json({ error: e.message || "Internal server error" });

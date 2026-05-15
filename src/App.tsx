@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
-import { format, subDays, startOfDay, isToday, parseISO } from "date-fns";
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
+import { format, subDays, startOfDay, isToday, isYesterday, parseISO } from "date-fns";
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock } from "lucide-react";
 
 // Types
@@ -44,13 +44,33 @@ export default function App() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
   const [backfillStatus, setBackfillStatus] = useState<{message: string, isError: boolean} | null>(null);
+  const [backfillLimit, setBackfillLimit] = useState<number>(50);
+  const [backfillDays, setBackfillDays] = useState<number>(7);
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
 
   // Filters state
   const [filterCategory, setFilterCategory] = useState<string>("All");
   const [filterUrgency, setFilterUrgency] = useState<string>("All");
   const [filterStatus, setFilterStatus] = useState<string>("All");
-  const [filterDays, setFilterDays] = useState<string>("7");
+  const [filterDays, setFilterDays] = useState<string>("All");
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const ITEMS_PER_PAGE = 20;
+
+  // Reset to first page whenever filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterCategory, filterUrgency, filterStatus, filterDays]);
+
+  const formatTicketDate = (dateStr: string) => {
+    try {
+      const d = parseISO(dateStr);
+      if (isToday(d)) return `Today, ${format(d, 'HH:mm')}`;
+      if (isYesterday(d)) return `Yesterday, ${format(d, 'HH:mm')}`;
+      return format(d, 'MMM d, HH:mm');
+    } catch {
+      return dateStr;
+    }
+  };
 
   // Custom api abstraction to handle headers easily
   const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
@@ -207,11 +227,11 @@ export default function App() {
     try {
       const res = await apiFetch('/api/backfill', {
         method: 'POST',
-        body: JSON.stringify({ limit: 20 })
+        body: JSON.stringify({ limit: backfillLimit, days: backfillDays })
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        setBackfillStatus({ message: `Backfill complete: Processed ${data.processed} messages, skipped ${data.skipped}.`, isError: false });
+        setBackfillStatus({ message: data.message || `Backfill complete: Processed ${data.processed} messages, skipped ${data.skipped}.`, isError: false });
         fetchTickets(); // fetch latest
       } else {
         setBackfillStatus({ message: "Error during backfill: " + data.error, isError: true });
@@ -287,6 +307,9 @@ export default function App() {
   }, {} as Record<string, number>);
   const categoryData = Object.entries(categoryCount).map(([name, value]) => ({ name, value }));
 
+  const totalPages = Math.ceil(filteredTickets.length / ITEMS_PER_PAGE);
+  const paginatedTickets = filteredTickets.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+
   return (
     <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12">
       <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none"></div>
@@ -332,14 +355,39 @@ export default function App() {
           <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-5 mb-6">
              <div className="flex justify-between items-center mb-2">
                <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Test Integration (Simulation)</h2>
-               <button 
-                 onClick={handleBackfill}
-                 disabled={isBackfilling}
-                 className="px-3 py-1 bg-white/10 hover:bg-white/20 transition rounded text-[10px] font-bold uppercase disabled:opacity-50 flex items-center"
-               >
-                 {isBackfilling ? <RefreshCcw className="w-3 h-3 animate-spin mr-1" /> : <Clock className="w-3 h-3 mr-1" />}
-                 Fetch Last 20 Messages
-               </button>
+               <div className="flex items-center space-x-2">
+                 <select
+                   value={backfillDays}
+                   onChange={(e) => setBackfillDays(Number(e.target.value))}
+                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
+                   disabled={isBackfilling}
+                 >
+                   <option value={1}>Last 24 Hours</option>
+                   <option value={3}>Last 3 Days</option>
+                   <option value={7}>Last 7 Days</option>
+                   <option value={14}>Last 14 Days</option>
+                   <option value={30}>Last 30 Days</option>
+                 </select>
+                 <select
+                   value={backfillLimit}
+                   onChange={(e) => setBackfillLimit(Number(e.target.value))}
+                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
+                   disabled={isBackfilling}
+                 >
+                   <option value={20}>Max 20</option>
+                   <option value={50}>Max 50</option>
+                   <option value={100}>Max 100</option>
+                   <option value={500}>Max 500</option>
+                 </select>
+                 <button 
+                   onClick={handleBackfill}
+                   disabled={isBackfilling}
+                   className="px-3 py-1 bg-white/10 hover:bg-white/20 transition rounded text-[10px] font-bold uppercase disabled:opacity-50 flex items-center"
+                 >
+                   {isBackfilling ? <RefreshCcw className="w-3 h-3 animate-spin mr-1" /> : <Clock className="w-3 h-3 mr-1" />}
+                   Fetch Messages
+                 </button>
+               </div>
              </div>
              <div className="flex space-x-3 mb-3">
                <input 
@@ -408,9 +456,9 @@ export default function App() {
               </select>
             </div>
             
-            {(filterDays !== "7" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All") && (
+            {(filterDays !== "All" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All") && (
               <button 
-                onClick={() => { setFilterDays("7"); setFilterStatus("All"); setFilterUrgency("All"); setFilterCategory("All"); }}
+                onClick={() => { setFilterDays("All"); setFilterStatus("All"); setFilterUrgency("All"); setFilterCategory("All"); }}
                 className="text-xs text-indigo-400 hover:text-indigo-300 ml-auto transition"
               >
                 Clear Filters
@@ -456,7 +504,7 @@ export default function App() {
                 <h3 className="text-sm font-semibold text-white/80">Issue Volume ({filterDays === "All" ? "30 Days (Max)" : `${filterDays} Days`})</h3>
               </div>
               <div className="h-64 flex-1">
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                   <LineChart data={volumeData}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                     <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase'}} />
@@ -469,29 +517,44 @@ export default function App() {
             </div>
             <div className="bg-white/5 border border-white/10 p-5 rounded-2xl backdrop-blur-xl flex flex-col">
               <h3 className="text-sm font-semibold text-white/80 mb-2">Category Breakdown</h3>
-              <div className="flex-1 flex items-center justify-center">
+              <div className="flex-1 flex flex-col items-center justify-center">
                 {filteredTickets.length === 0 ? (
                   <div className="text-white/40 text-sm">No data yet</div>
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={categoryData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={80}
-                        paddingAngle={2}
-                        dataKey="value"
-                        stroke="rgba(0,0,0,0)"
-                      >
-                        {categoryData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: number) => [`${value} tickets`, 'Count']} contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
+                  <div className="flex w-full h-full items-center">
+                    <div className="w-1/2 h-full min-h-[160px]">
+                      <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                        <PieChart>
+                          <Pie
+                            data={categoryData}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={50}
+                            outerRadius={70}
+                            paddingAngle={2}
+                            dataKey="value"
+                            stroke="rgba(0,0,0,0)"
+                          >
+                            {categoryData.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(value: number) => [`${value} tickets`, 'Count']} contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff', fontSize: '12px' }} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="w-1/2 flex flex-col justify-center space-y-2 max-h-[160px] overflow-y-auto pl-4 pr-2">
+                       {categoryData.sort((a, b) => b.value - a.value).map((entry, index) => (
+                          <div key={entry.name} className="flex items-center justify-between">
+                             <div className="flex items-center space-x-2 truncate min-w-0">
+                               <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }}></span>
+                               <span className="text-xs text-white/70 truncate" title={entry.name}>{entry.name}</span>
+                             </div>
+                             <span className="text-xs font-bold text-white shrink-0 ml-2">{entry.value}</span>
+                          </div>
+                       ))}
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
@@ -517,10 +580,10 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="text-sm">
-                  {filteredTickets.length === 0 ? (
-                    <tr><td colSpan={5} className="px-5 py-8 text-center text-white/40">No tickets found matching current filters.</td></tr>
+                  {paginatedTickets.length === 0 ? (
+                    <tr><td colSpan={5} className="px-5 py-8 text-center text-white/40">No tickets found on this page.</td></tr>
                   ) : (
-                    filteredTickets.map(ticket => (
+                    paginatedTickets.map(ticket => (
                       <React.Fragment key={ticket.id}>
                         <tr 
                           className={`border-b border-white/5 hover:bg-white/5 cursor-pointer transition ${ticket.urgency === 'Critical' ? 'bg-rose-500/5' : ''}`}
@@ -555,7 +618,7 @@ export default function App() {
                           </td>
                           <td className="px-5 py-4 text-white/60">{ticket.category}</td>
                           <td className="px-5 py-4 text-right text-white/40 whitespace-nowrap font-mono text-[10px]">
-                            {format(parseISO(ticket.created_at), 'HH:mm')}
+                            {formatTicketDate(ticket.created_at)}
                           </td>
                         </tr>
                         {/* Expanded details */}
@@ -611,6 +674,29 @@ export default function App() {
                   )}
                 </tbody>
               </table>
+              {totalPages > 1 && (
+                <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 bg-transparent">
+                  <div className="text-[10px] uppercase font-bold text-white/40 tracking-widest">
+                    Showing {(currentPage - 1) * ITEMS_PER_PAGE + 1} to {Math.min(currentPage * ITEMS_PER_PAGE, filteredTickets.length)} of {filteredTickets.length} messages
+                  </div>
+                  <div className="flex space-x-2">
+                    <button 
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
+                      disabled={currentPage === 1} 
+                      className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
+                    >
+                      Prev
+                    </button>
+                    <button 
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
+                      disabled={currentPage === totalPages} 
+                      className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </main>
