@@ -67,6 +67,11 @@ export default function App() {
       localStorage.removeItem('PULSEDESK_ADMIN_KEY');
       throw new Error("Unauthorized");
     }
+    const contentType = res.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      const text = await res.text();
+      throw new Error(`API Error: Expected JSON but got ${contentType} on ${endpoint}: ${text.substring(0, 50)}`);
+    }
     return res;
   };
 
