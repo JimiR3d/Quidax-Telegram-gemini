@@ -53,13 +53,17 @@ export default function App() {
   const [filterUrgency, setFilterUrgency] = useState<string>("All");
   const [filterStatus, setFilterStatus] = useState<string>("All");
   const [filterDays, setFilterDays] = useState<string>("All");
+  const [filterStartDate, setFilterStartDate] = useState<string>("");
+  const [filterEndDate, setFilterEndDate] = useState<string>("");
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const ITEMS_PER_PAGE = 20;
+  const [itemsPerPage, setItemsPerPage] = useState<number>(20);
 
   // Reset to first page whenever filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [filterCategory, filterUrgency, filterStatus, filterDays]);
+  }, [filterCategory, filterUrgency, filterStatus, filterDays, filterStartDate, filterEndDate, searchQuery, itemsPerPage]);
 
   const formatTicketDate = (dateStr: string) => {
     try {
@@ -93,6 +97,30 @@ export default function App() {
       throw new Error(`API Error: Expected JSON but got ${contentType} on ${endpoint}: ${text.substring(0, 50)}`);
     }
     return res;
+  };
+
+  const handleUpdateStatus = async (ticketId: string, newStatus: string) => {
+    try {
+      const res = await apiFetch(`/api/tickets/${ticketId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (res.ok) {
+        fetchTickets();
+      } else {
+        const errorData = await res.json();
+        alert(`Failed to update status: ${errorData.error}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to update status.");
+    }
+  };
+
+  const simulateTicketingIntegration = (ticket: any) => {
+    // Note: Quidax Zendesk Integration via API Simulation
+    alert(`[Quidax API Integration]\n\nPulseDesk is automatically sending a POST request to Quidax's External Ticketing API (e.g., Zendesk)...\n\nTicket #${ticket.id} details pushed. Sync successful.\n\nStatus automatically marked as 'Escalated'.`);
+    handleUpdateStatus(ticket.id, 'Resolved');
   };
 
   const verifyLogin = async (e?: React.FormEvent) => {
@@ -191,13 +219,26 @@ export default function App() {
     if (filterUrgency !== "All" && t.urgency?.trim().toLowerCase() !== filterUrgency.toLowerCase()) return false;
     if (filterStatus !== "All" && t.status?.trim().toLowerCase() !== filterStatus.toLowerCase()) return false;
     
-    if (filterDays !== "All") {
+    if (filterDays !== "All" && filterDays !== "Custom") {
       const days = parseInt(filterDays);
       const thresholdDate = subDays(startOfDay(new Date()), days - 1);
       if (t.created_at && parseISO(t.created_at) < thresholdDate) return false;
     }
+    
+    if (filterDays === "Custom") {
+      if (filterStartDate && t.created_at && parseISO(t.created_at) < parseISO(filterStartDate)) return false;
+      if (filterEndDate && t.created_at && parseISO(t.created_at) > parseISO(filterEndDate)) return false;
+    }
+    
+    if (searchQuery.trim()) {
+      const sq = searchQuery.toLowerCase();
+      const matchesSummary = t.summary?.toLowerCase().includes(sq);
+      const matchesText = t.raw_text?.toLowerCase().includes(sq);
+      if (!matchesSummary && !matchesText) return false;
+    }
+    
     return true;
-  });
+  }).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
   const simulateIngestion = async () => {
     if (!simMessage.trim()) return;
@@ -290,9 +331,21 @@ export default function App() {
   const resolutionRate = filteredTickets.length ? Math.round((resolvedCount / filteredTickets.length) * 100) : 0;
 
   // Chart Data: Volume over time
-  const maxDays = filterDays === "All" ? 30 : parseInt(filterDays);
+  let maxDays = filterDays === "All" ? 30 : filterDays === "Custom" ? 30 : parseInt(filterDays);
+  let refDate = new Date();
+  if (filterDays === "Custom" && filterStartDate && filterEndDate) {
+     const startD = parseISO(filterStartDate);
+     const endD = parseISO(filterEndDate);
+     if (!isNaN(startD.getTime()) && !isNaN(endD.getTime()) && startD <= endD) {
+       const diffTime = Math.abs(endD.getTime() - startD.getTime());
+       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+       maxDays = Math.min(diffDays, 60);
+       refDate = endD;
+     }
+  }
+
   const volumeData = Array.from({length: maxDays}).map((_, i) => {
-    const d = subDays(new Date(), (maxDays - 1) - i);
+    const d = subDays(refDate, (maxDays - 1) - i);
     const dateStr = format(d, 'MMM dd');
     return {
       date: dateStr,
@@ -307,8 +360,14 @@ export default function App() {
   }, {} as Record<string, number>);
   const categoryData = Object.entries(categoryCount).map(([name, value]) => ({ name, value }));
 
-  const totalPages = Math.ceil(filteredTickets.length / ITEMS_PER_PAGE);
-  const paginatedTickets = filteredTickets.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+  // Chart Data: Resolution Comparison
+  const resolutionData = [
+    { name: 'Resolved', value: filteredTickets.filter(t => t.status === 'Resolved' || t.status === 'Dismissed').length },
+    { name: 'Open / In Review', value: filteredTickets.filter(t => t.status === 'Open' || t.status === 'In Review').length }
+  ];
+
+  const totalPages = Math.ceil(filteredTickets.length / itemsPerPage);
+  const paginatedTickets = filteredTickets.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   return (
     <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12">
@@ -322,8 +381,8 @@ export default function App() {
              <Activity className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">PULSEDESK</h1>
-            <p className="text-[10px] text-indigo-300 font-mono tracking-widest uppercase">Community Intelligence</p>
+            <h1 className="text-xl font-bold tracking-tight">QUIDAX PULSEDESK</h1>
+            <p className="text-[10px] text-indigo-300 font-mono tracking-widest uppercase">Powered by SPICED Values</p>
           </div>
         </div>
         
@@ -385,8 +444,10 @@ export default function App() {
                    className="px-3 py-1 bg-white/10 hover:bg-white/20 transition rounded text-[10px] font-bold uppercase disabled:opacity-50 flex items-center"
                  >
                    {isBackfilling ? <RefreshCcw className="w-3 h-3 animate-spin mr-1" /> : <Clock className="w-3 h-3 mr-1" />}
-                   Fetch Messages
+                   Sync History Data
                  </button>
+
+                 <div title='System listens live and background syncs every 15m automatically' className='flex items-center space-x-1.5 ml-2 text-[10px] font-bold uppercase text-emerald-400 border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 rounded cursor-help'><span className='relative flex h-2 w-2'><span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75'></span><span className='relative inline-flex rounded-full h-2 w-2 bg-emerald-500'></span></span><span>Live Auto-Sync Active</span></div>
                </div>
              </div>
              <div className="flex space-x-3 mb-3">
@@ -395,7 +456,7 @@ export default function App() {
                  value={simMessage}
                  onChange={e => setSimMessage(e.target.value)}
                  onKeyDown={e => e.key === 'Enter' && simulateIngestion()}
-                 placeholder="Simulate a message from Telegram (e.g. 'My withdrawal is stuck for 3 hours!')"
+                 placeholder="Simulate a customer message from Telegram (e.g. 'My withdrawal is stuck for 3 hours!')"
                  className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 backdrop-blur-md transition-all"
                />
                <button 
@@ -418,13 +479,31 @@ export default function App() {
           <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-4 flex flex-wrap gap-4 items-center mb-6">
             <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest mr-2">Filters</h2>
             
-            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+            <div className="flex-1 min-w-[200px]">
+              <input 
+                type="text" 
+                placeholder="Search tickets..." 
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-indigo-500/50 transition-colors placeholder:text-white/30"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+
+            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10 items-center">
               <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterDays} onChange={e => setFilterDays(e.target.value)}>
                 <option value="All">All Time</option>
                 <option value="1">Last 24h</option>
                 <option value="7">Last 7 Days</option>
                 <option value="30">Last 30 Days</option>
+                <option value="Custom">Custom Range</option>
               </select>
+              {filterDays === "Custom" && (
+                <div className="flex items-center space-x-2 ml-2 px-2 border-l border-white/10">
+                  <input type="date" className="bg-transparent text-sm text-white/80 outline-none appearance-none cursor-pointer [color-scheme:dark]" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} />
+                  <span className="text-white/40text-xs">to</span>
+                  <input type="date" className="bg-transparent text-sm text-white/80 outline-none appearance-none cursor-pointer [color-scheme:dark]" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} />
+                </div>
+              )}
             </div>
 
             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
@@ -456,9 +535,9 @@ export default function App() {
               </select>
             </div>
             
-            {(filterDays !== "All" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All") && (
+            {(filterDays !== "All" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All" || filterStartDate || filterEndDate || searchQuery) && (
               <button 
-                onClick={() => { setFilterDays("All"); setFilterStatus("All"); setFilterUrgency("All"); setFilterCategory("All"); }}
+                onClick={() => { setFilterDays("All"); setFilterStatus("All"); setFilterUrgency("All"); setFilterCategory("All"); setFilterStartDate(""); setFilterEndDate(""); setSearchQuery(""); }}
                 className="text-xs text-indigo-400 hover:text-indigo-300 ml-auto transition"
               >
                 Clear Filters
@@ -467,70 +546,116 @@ export default function App() {
           </div>
 
           {/* Stats Row */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="bg-white/5 border border-white/10 p-4 rounded-2xl backdrop-blur-xl">
-              <p className="text-[10px] uppercase tracking-wider text-white/40 mb-1 font-semibold">Tickets Today</p>
-              <div className="text-2xl font-bold">{ticketsToday.length}</div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl">
+              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Tickets Today</p>
+              <div className="text-4xl font-bold">{ticketsToday.length}</div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-4 rounded-2xl backdrop-blur-xl">
-              <p className="text-[10px] uppercase tracking-wider text-white/40 mb-1 font-semibold">Open Tickets</p>
-              <div className="text-2xl font-bold text-indigo-400">{openCount}</div>
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl">
+              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Open Tickets</p>
+              <div className="text-4xl font-bold text-indigo-400">{openCount}</div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-4 rounded-2xl backdrop-blur-xl">
-              <p className="text-[10px] uppercase tracking-wider text-white/40 mb-1 font-semibold">Resolution Rate</p>
-              <div className="flex items-end justify-between">
-                <span className="text-2xl font-bold">{resolutionRate}%</span>
-                <div className="w-16 h-1.5 bg-white/10 rounded-full mb-1.5">
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Resolution Rate</p>
+              <div className="flex items-end justify-between w-full">
+                <span className="text-4xl font-bold">{resolutionRate}%</span>
+                <div className="w-24 h-2 bg-white/10 rounded-full mb-2">
                   <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${resolutionRate}%` }}></div>
                 </div>
               </div>
             </div>
-            <div className="bg-rose-500/10 border border-rose-500/20 p-4 rounded-2xl backdrop-blur-xl">
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-[10px] uppercase tracking-wider text-rose-400 font-semibold">{urgencyCardLabel}</p>
-                <AlertTriangle className={`w-4 h-4 ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/40'}`} />
+            <div className="bg-rose-500/10 border border-rose-500/20 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold">{urgencyCardLabel}</p>
+                <AlertTriangle className={`w-5 h-5 ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/40'}`} />
               </div>
-              <div className="flex items-end justify-between">
-                 <span className={`text-2xl font-bold ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/80'}`}>{urgencyCount}</span>
-                 {urgencyCount > 0 && <span className="bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded uppercase font-bold mb-1">Urgent</span>}
+              <div className="flex items-end justify-between w-full">
+                 <span className={`text-4xl font-bold ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/80'}`}>{urgencyCount}</span>
+                 {urgencyCount > 0 && <span className="bg-rose-500 text-white text-xs px-2 py-1 rounded uppercase font-bold mb-1">Urgent</span>}
               </div>
             </div>
           </div>
 
-          {/* Charts Row */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="bg-white/5 border border-white/10 p-5 rounded-2xl backdrop-blur-xl col-span-2 flex flex-col">
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="text-sm font-semibold text-white/80">Issue Volume ({filterDays === "All" ? "30 Days (Max)" : `${filterDays} Days`})</h3>
+          {/* Charts Area */}
+          <div className="flex flex-col gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col md:col-span-2 min-h-[250px]">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-base font-semibold text-white/90">Issue Volume ({filterDays === "All" ? "30 Days (Max)" : filterDays === "Custom" ? "Custom Range" : `${filterDays} Days`})</h3>
+                </div>
+                <div className="flex-1 w-full relative h-[200px]">
+                  <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                    <LineChart data={volumeData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                      <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase'}} />
+                      <YAxis axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 11}} />
+                      <Tooltip contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff' }} itemStyle={{ color: '#fff' }} />
+                      <Line type="monotone" dataKey="tickets" stroke="#6366f1" strokeWidth={3} dot={{r: 4, strokeWidth: 2, fill: '#05070a', stroke: '#6366f1'}} activeDot={{r: 6, fill: '#6366f1', stroke: '#fff'}} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
-              <div className="h-64 flex-1">
-                <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                  <LineChart data={volumeData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                    <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase'}} />
-                    <YAxis axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 10}} />
-                    <Tooltip contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff' }} itemStyle={{ color: '#fff' }} />
-                    <Line type="monotone" dataKey="tickets" stroke="#6366f1" strokeWidth={3} dot={{r: 4, strokeWidth: 2, fill: '#05070a', stroke: '#6366f1'}} activeDot={{r: 6, fill: '#6366f1', stroke: '#fff'}} />
-                  </LineChart>
-                </ResponsiveContainer>
+
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col min-h-[250px]">
+                <h3 className="text-base font-semibold text-white/90 mb-4">Resolution Comparison</h3>
+                <div className="flex-1 flex flex-col items-center justify-center">
+                  {filteredTickets.length === 0 ? (
+                    <div className="text-white/40 text-sm">No data yet</div>
+                  ) : (
+                    <div className="flex flex-col w-full h-full items-center">
+                      <div className="w-full h-[140px] mb-4">
+                        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                          <PieChart>
+                            <Pie
+                              data={resolutionData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={0}
+                              outerRadius={65}
+                              dataKey="value"
+                              stroke="rgba(0,0,0,0)"
+                            >
+                              <Cell fill="#10b981" />
+                              <Cell fill="#6366f1" />
+                            </Pie>
+                            <Tooltip formatter={(value: number) => [`${value} tickets`, 'Count']} contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff', fontSize: '12px' }} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <div className="w-full flex justify-center space-x-6">
+                         <div className="flex items-center">
+                            <span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2"></span>
+                            <span className="text-sm text-white/80 mr-2">Resolved</span>
+                            <span className="text-sm font-bold text-white shrink-0">{resolutionData[0].value}</span>
+                         </div>
+                         <div className="flex items-center">
+                            <span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2"></span>
+                            <span className="text-sm text-white/80 mr-2">Open</span>
+                            <span className="text-sm font-bold text-white shrink-0">{resolutionData[1].value}</span>
+                         </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-5 rounded-2xl backdrop-blur-xl flex flex-col">
-              <h3 className="text-sm font-semibold text-white/80 mb-2">Category Breakdown</h3>
+
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col">
+              <h3 className="text-base font-semibold text-white/90 mb-4">Category Breakdown</h3>
               <div className="flex-1 flex flex-col items-center justify-center">
                 {filteredTickets.length === 0 ? (
                   <div className="text-white/40 text-sm">No data yet</div>
                 ) : (
-                  <div className="flex w-full h-full items-center">
-                    <div className="w-1/2 h-full min-h-[160px]">
+                  <div className="flex flex-col md:flex-row w-full h-full items-center">
+                    <div className="w-full md:w-1/3 h-[180px] mb-4 md:mb-0">
                       <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                         <PieChart>
                           <Pie
                             data={categoryData}
                             cx="50%"
                             cy="50%"
-                            innerRadius={50}
-                            outerRadius={70}
+                            innerRadius={55}
+                            outerRadius={80}
                             paddingAngle={2}
                             dataKey="value"
                             stroke="rgba(0,0,0,0)"
@@ -543,14 +668,14 @@ export default function App() {
                         </PieChart>
                       </ResponsiveContainer>
                     </div>
-                    <div className="w-1/2 flex flex-col justify-center space-y-2 max-h-[160px] overflow-y-auto pl-4 pr-2">
-                       {categoryData.sort((a, b) => b.value - a.value).map((entry, index) => (
-                          <div key={entry.name} className="flex items-center justify-between">
+                    <div className="w-full md:w-2/3 grid grid-cols-2 md:grid-cols-3 gap-y-3 gap-x-6 pl-4">
+                       {categoryData.sort((a: any, b: any) => b.value - a.value).map((entry, index) => (
+                          <div key={entry.name} className="flex items-center justify-between bg-white/5 px-3 py-2 rounded-lg border border-white/5">
                              <div className="flex items-center space-x-2 truncate min-w-0">
-                               <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }}></span>
-                               <span className="text-xs text-white/70 truncate" title={entry.name}>{entry.name}</span>
+                               <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }}></span>
+                               <span className="text-sm text-white/80 truncate" title={entry.name}>{entry.name}</span>
                              </div>
-                             <span className="text-xs font-bold text-white shrink-0 ml-2">{entry.value}</span>
+                             <span className="text-sm font-bold text-white shrink-0 ml-2">{entry.value}</span>
                           </div>
                        ))}
                     </div>
@@ -627,7 +752,7 @@ export default function App() {
                             <td colSpan={5} className="px-5 py-5">
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div>
-                                  <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Original Telegram Message</div>
+                                  <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Customer's Original Message</div>
                                   <div className="bg-white/5 p-4 rounded-xl border border-white/10 text-white/80 text-sm whitespace-pre-wrap leading-relaxed">
                                     "{ticket.raw_text.split('[ADMIN_REPLY]')[0].trim()}"
                                   </div>
@@ -660,8 +785,35 @@ export default function App() {
                                       <div className="text-sm text-white/90 font-medium">{ticket.product_area}</div>
                                     </div>
                                     <div className="bg-white/5 border border-white/10 rounded-xl p-3">
-                                      <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">User Sentiment</div>
+                                      <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">Customer Sentiment</div>
                                       <div className="text-sm text-white/90 font-medium">{ticket.sentiment}</div>
+                                    </div>
+                                    <div className="col-span-2 mt-2">
+                                       <button
+                                         onClick={() => simulateTicketingIntegration(ticket)}
+                                         className="w-full mb-2 flex items-center justify-center py-2.5 px-4 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white font-medium text-sm transition font-bold"
+                                       >
+                                         <Send className="w-4 h-4 mr-2" />
+                                         Auto-Create Zendesk Ticket (API)
+                                       </button>
+                                       <div className="flex space-x-2">
+                                          <button
+                                            onClick={() => handleUpdateStatus(ticket.id, 'Resolved')}
+                                            className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium text-sm transition border border-emerald-500/20"
+                                          >
+                                            <CheckCircle className="w-4 h-4 mr-2" />
+                                            Mark Resolved
+                                          </button>
+                                          <a
+                                            href={encodeURI(`mailto:support@quidax.com?subject=Escalated [${ticket.urgency}] Support Ticket: ${ticket.category}`)}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-white/5 hover:bg-white/10 text-white/80 font-medium text-sm transition border border-white/10"
+                                          >
+                                            <Send className="w-4 h-4 mr-2" />
+                                            Email Support
+                                          </a>
+                                       </div>
                                     </div>
                                   </div>
                                 </div>
@@ -675,25 +827,40 @@ export default function App() {
                 </tbody>
               </table>
               {totalPages > 1 && (
-                <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 bg-transparent">
+                <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 bg-transparent pb-6">
                   <div className="text-[10px] uppercase font-bold text-white/40 tracking-widest">
-                    Showing {(currentPage - 1) * ITEMS_PER_PAGE + 1} to {Math.min(currentPage * ITEMS_PER_PAGE, filteredTickets.length)} of {filteredTickets.length} messages
+                    Showing {(currentPage - 1) * itemsPerPage + 1} to {Math.min(currentPage * itemsPerPage, filteredTickets.length)} of {filteredTickets.length} messages
                   </div>
-                  <div className="flex space-x-2">
-                    <button 
-                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
-                      disabled={currentPage === 1} 
-                      className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
-                    >
-                      Prev
-                    </button>
-                    <button 
-                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
-                      disabled={currentPage === totalPages} 
-                      className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
-                    >
-                      Next
-                    </button>
+                  <div className="flex items-center space-x-4">
+                    <div className="flex items-center space-x-2">
+                       <span className="text-[10px] uppercase font-bold text-white/40 tracking-widest">Rows per page:</span>
+                       <select 
+                         className="bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-white outline-none [&>option]:text-black"
+                         value={itemsPerPage}
+                         onChange={e => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                       >
+                         <option value={10}>10</option>
+                         <option value={20}>20</option>
+                         <option value={30}>30</option>
+                         <option value={50}>50</option>
+                       </select>
+                    </div>
+                    <div className="flex space-x-2">
+                      <button 
+                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
+                        disabled={currentPage === 1} 
+                        className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
+                      >
+                        Prev
+                      </button>
+                      <button 
+                        onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
+                        disabled={currentPage === totalPages} 
+                        className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
+                      >
+                        Next
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

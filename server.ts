@@ -157,6 +157,21 @@ async function startServer() {
       if (!validUrgencies.includes(ticket.urgency)) ticket.urgency = 'Medium';
       if (!validProductAreas.includes(ticket.product_area)) ticket.product_area = 'Other';
       if (!validSentiments.includes(ticket.sentiment)) ticket.sentiment = 'Confused';
+      
+      // Ensure summary exists
+      if (!ticket.summary || typeof ticket.summary !== 'string') {
+        ticket.summary = 'User inquiry regarding ' + ticket.category;
+      }
+      
+      // Ensure is_complaint exists
+      if (typeof ticket.is_complaint !== 'boolean') {
+        ticket.is_complaint = ticket.category !== 'Praise' && ticket.category !== 'General Question';
+      }
+      
+      // Ensure suggested_action exists
+      if (!ticket.suggested_action || typeof ticket.suggested_action !== 'string') {
+        ticket.suggested_action = 'Follow up with user';
+      }
 
       return ticket;
     } catch (e) {
@@ -164,29 +179,61 @@ async function startServer() {
     }
   }
 
-  async function processAndIngestMessage(text: string, telegramId: number, groupId: string, replyToMsgId?: number) {
+  let cachedAdmins = new Set<string>();
+  let lastAdminFetch = 0;
+
+  async function checkIsAdmin(groupId: string, senderId?: any): Promise<boolean> {
+    if (!senderId || !tlClient) return false;
+    if (Date.now() - lastAdminFetch > 1000 * 60 * 60) {
+       try {
+         const { Api } = await import("telegram");
+         const participants = await tlClient.invoke(
+           new Api.channels.GetParticipants({
+             channel: groupId,
+             filter: new Api.ChannelParticipantsAdmins() as any,
+             offset: 0,
+             limit: 100,
+             hash: 0 as any,
+           })
+         );
+         cachedAdmins = new Set(participants.participants.map((p: any) => p.userId.toString()));
+         lastAdminFetch = Date.now();
+       } catch (e) {
+         console.error("Failed to fetch admins:", e);
+       }
+    }
+    return cachedAdmins.has(senderId.toString());
+  }
+
+  async function processAndIngestMessage(text: string, telegramId: number, groupId: string, replyToMsgId?: number, msgDate?: number, isAdmin?: boolean) {
+    console.log("processAndIngestMessage START", "telegramId:", telegramId, "msgDate:", msgDate);
     if (!text || text.length < 5) {
        throw new Error("Message too short or empty");
     }
     const supabase = getSupabase();
 
     if (replyToMsgId) {
-      try {
-        const { data: parentMsg } = await supabase.from('messages').select('id').eq('telegram_message_id', String(replyToMsgId)).single();
-        if (parentMsg) {
-          const { data: parentTicket } = await supabase.from('tickets').select('*').eq('message_id', parentMsg.id).single();
-          if (parentTicket) {
-             const newRawText = parentTicket.raw_text + `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
-             await supabase.from('tickets').update({
-                raw_text: newRawText,
-                status: 'In Review'
-             }).eq('id', parentTicket.id);
-             console.log(`[Admin Reply] Attached reply to ticket ${parentTicket.id}`);
-             return parentTicket;
+      if (isAdmin) {
+        try {
+          const { data: parentMsg } = await supabase.from('messages').select('id').eq('telegram_message_id', String(replyToMsgId)).single();
+          if (parentMsg) {
+            const { data: parentTicket } = await supabase.from('tickets').select('*').eq('message_id', parentMsg.id).single();
+            if (parentTicket) {
+               const newRawText = parentTicket.raw_text + `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+               await supabase.from('tickets').update({
+                  raw_text: newRawText,
+                  status: 'In Review'
+               }).eq('id', parentTicket.id);
+               console.log(`[Admin Reply] Attached reply to ticket ${parentTicket.id}`);
+               return parentTicket;
+            }
           }
+        } catch (err) {
+          console.error("Error looking up parent ticket for reply:", err);
         }
-      } catch (err) {
-        console.error("Error looking up parent ticket for reply:", err);
+      } else {
+        console.log(`[User Reply] Ignoring user reply to message ${replyToMsgId}`);
+        return null; // Skip processing non-admin replies as new tickets
       }
     }
 
@@ -194,11 +241,24 @@ async function startServer() {
       throw new Error("GROQ_API_KEY is missing. Please add it to Secrets.");
     }
     
-    const systemInstruction = `You are a support triage analyst for a fintech/crypto company. Follow these instructions exactly. Classify the user's message. You must reply with a valid JSON payload matching the target schema.`;
+    const systemInstruction = `You are a support triage analyst for Quidax.
+We abide by our SPICED core values:
+S - Simplicity (Keep things simple, no vague wording)
+P - People (Respect and empathy)
+I - Integrity (No fluff, just facts, promise what we deliver)
+C - Customers (They are the main character of their crypto journey)
+E - Excellence (Crush KPIs, break ceilings)
+D - Discipline (Show up, get it done)
+
+Follow these instructions exactly:
+1. Classify the user's message.
+2. Ensure the \`summary\` is simple and devoid of unnecessary crypto jargon.
+3. The \`suggested_action\` should reflect our values, e.g., 'Act with discipline to resolve their issue simply and smoothly'.
+You must reply with a valid JSON payload matching the target schema.`;
     
-    // Call Groq API
+    // Call Groq API with an alternative model with higher limits!
     const response = await openai.chat.completions.create({
-      model: "llama-3.3-70b-versatile", // Fast and capable Groq model
+      model: "llama-3.1-8b-instant", 
       messages: [
         { role: "system", content: systemInstruction },
         { role: "user", content: `Please classify this message: "${text}"\n\nEnsure your response strictly follows this JSON schema structure:\n${JSON.stringify(responseSchema.json_schema.schema)}` }
@@ -214,6 +274,7 @@ async function startServer() {
     }
 
     const senderHash = crypto.createHash('sha256').update(telegramId.toString()).digest('hex');
+    const msgDateISO = msgDate ? new Date(msgDate * 1000).toISOString() : new Date().toISOString();
 
     // 1. Insert the raw message into the messages table
     const { data: dbMessage, error: msgError } = await supabase
@@ -223,7 +284,7 @@ async function startServer() {
         group_id: groupId,
         sender_hash: senderHash,
         raw_text: text,
-        message_timestamp: new Date().toISOString()
+        message_timestamp: msgDateISO
       })
       .select('id')
       .single();
@@ -237,21 +298,27 @@ async function startServer() {
       throw new Error(`DB Error inserting message: ${msgError.message}`);
     }
 
+    // Auto-escalation state
+    const needsEscalation = ticketData.urgency === 'Critical' || ticketData.urgency === 'High';
+    const initialStatus = needsEscalation ? 'In Review' : 'Open';
+    const initialSummary = needsEscalation ? `[ESCALATED] ${ticketData.summary}` : ticketData.summary;
+
     // 2. Insert the classified ticket
     const { data: dbTicket, error: ticketError } = await supabase
       .from('tickets')
       .insert({
         message_id: dbMessage.id,
         group_id: groupId,
-        summary: ticketData.summary,
+        summary: initialSummary,
         category: ticketData.category,
         urgency: ticketData.urgency,
         product_area: ticketData.product_area,
         sentiment: ticketData.sentiment,
         is_complaint: ticketData.is_complaint,
         suggested_action: ticketData.suggested_action,
-        status: 'Open',
-        raw_text: text
+        status: initialStatus,
+        raw_text: text,
+        created_at: msgDateISO
       })
       .select('*')
       .single();
@@ -289,6 +356,44 @@ async function startServer() {
         await client.connect();
         console.log("✅ Connected to Telegram using session string!");
         
+        // --- AUTO-FETCH (CRON) FOR MISSED MESSAGES ---
+        // Fetch recent messages every 15 minutes to ensure nothing is missed
+        // in case the live listener drops or disconnects.
+        setInterval(async () => {
+          try {
+            console.log(`[Auto-Fetch] Running periodic check for missed messages in ${targetGroup}...`);
+            const messages = await client.getMessages(targetGroup, { limit: 20 });
+            
+            // Only process valid messages from the last 1-2 hours
+            const cutoffDate = Math.floor(Date.now() / 1000) - (2 * 60 * 60); 
+            
+            for (const msg of messages) {
+              if (!msg || !msg.text) continue;
+              if (msg.date < cutoffDate) continue;
+              
+              const text = String(msg.text);
+              const words = text.trim().split(/\s+/);
+              if (words.length < 5) continue;
+              
+              try {
+                const id = msg.id || Math.floor(Math.random() * 10000000);
+                const replyToMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
+                const senderId = msg.senderId;
+                const isAdmin = await checkIsAdmin(targetGroup, senderId);
+                
+                // processAndIngestMessage ignores duplicates already in the database
+                await processAndIngestMessage(text, id, targetGroup, replyToMsgId, msg.date, isAdmin);
+              } catch(e: any) {
+                // Ignore errors from already processed messages or duplicates
+              }
+              // Small delay
+              await new Promise(r => setTimeout(r, 600));
+            }
+          } catch (autoErr) {
+            console.error("[Auto-Fetch] Error during periodic check:", autoErr);
+          }
+        }, 15 * 60 * 1000); // Every 15 minutes
+
         client.addEventHandler(async (event: any) => {
           const message = event.message;
           if (!message || !message.text) return;
@@ -299,10 +404,12 @@ async function startServer() {
           
           try {
             const chat = await message.getChat();
-            if (chat && (chat.username === targetGroup || chat.title?.includes(targetGroup))) {
+            if (chat && (chat.username === targetGroup || chat.title?.includes(targetGroup) || chat.title?.toLowerCase().includes("quidax"))) {
               console.log(`[Telegram Listener] Received message in ${targetGroup}: ${text.substring(0, 50)}...`);
               const replyToMsgId = message.replyTo?.replyToMsgId || message.replyToMsgId;
-              await processAndIngestMessage(text, message.id || Math.floor(Math.random() * 10000000), targetGroup, replyToMsgId);
+              const senderId = message.senderId;
+              const isAdmin = await checkIsAdmin(targetGroup, senderId);
+              await processAndIngestMessage(text, message.id || Math.floor(Math.random() * 10000000), targetGroup, replyToMsgId, message.date, isAdmin);
             }
           } catch (e) {
             console.error("[Telegram Listener] Error processing live message:", e);
@@ -434,7 +541,9 @@ async function startServer() {
                try {
                   const id = msg.id || Math.floor(Math.random() * 10000000);
                   const replyToMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
-                  await processAndIngestMessage(String(msg.text).trim(), id, targetGroup, replyToMsgId);
+                  const senderId = msg.senderId;
+                  const isAdmin = await checkIsAdmin(targetGroup, senderId);
+                  await processAndIngestMessage(String(msg.text).trim(), id, targetGroup, replyToMsgId, msg.date, isAdmin);
                } catch(e: any) {
                   console.error(`[Backfill Background] Error on msg ${msg.id}:`, e.message || e);
                }
@@ -458,7 +567,7 @@ async function startServer() {
       const tId = telegramId || Math.floor(Math.random() * 10000000);
       const groupId = "OfficialQuidaxCommunity";
       
-      const dbTicket = await processAndIngestMessage(text, tId, groupId);
+      const dbTicket = await processAndIngestMessage(text, tId, groupId, undefined, undefined, false);
       res.status(200).json({ success: true, message: "Ingested", ticket: dbTicket });
     } catch (e: any) {
       console.error(e);
