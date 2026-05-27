@@ -46,6 +46,7 @@ export default function App() {
   const [backfillStatus, setBackfillStatus] = useState<{message: string, isError: boolean} | null>(null);
   const [backfillLimit, setBackfillLimit] = useState<number>(50);
   const [backfillDays, setBackfillDays] = useState<number>(7);
+  const [backfillMinUrgency, setBackfillMinUrgency] = useState<string>("All");
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
 
   // Filters state
@@ -278,7 +279,7 @@ export default function App() {
     try {
       const res = await apiFetch('/api/backfill', {
         method: 'POST',
-        body: JSON.stringify({ limit: backfillLimit, days: backfillDays })
+        body: JSON.stringify({ limit: backfillLimit, days: backfillDays, minUrgency: backfillMinUrgency })
       });
       const data = await res.json();
       if (res.ok && data.success) {
@@ -455,6 +456,17 @@ export default function App() {
                    <option value={50}>Max 50</option>
                    <option value={100}>Max 100</option>
                    <option value={500}>Max 500</option>
+                 </select>
+                 <select
+                   value={backfillMinUrgency}
+                   onChange={(e) => setBackfillMinUrgency(e.target.value)}
+                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
+                   disabled={isBackfilling}
+                 >
+                   <option value="All">All Urgencies</option>
+                   <option value="Medium">Medium & Above</option>
+                   <option value="High">High & Critical</option>
+                   <option value="Critical">Critical Only</option>
                  </select>
                  <button 
                    onClick={handleBackfill}

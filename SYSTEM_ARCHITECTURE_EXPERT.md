@@ -8,9 +8,9 @@ PulseDesk is a fintech-oriented, AI-powered triage and ticketing system designed
 ### 2.1 Backend (Node.js + Express)
 *   **Runtime:** Node.js processing inside a Docker container (deployed via Cloud Run), binding solely to Port `3000` via `0.0.0.0` as per infrastructure constraints.
 *   **Framework:** Express.js `4.21.2` handles routing and custom middleware.
-*   **Ingestion:** Telegram AT protocol via GramJS (`telegram: 2.26.22`) acts as a persistent TCP listener for live messages.
-*   **AI Service:** Groq API (`llama-3.3-70b-versatile`) acts as the natural language understanding agent to classify text into structured JSON shapes with 7 parameters (category, urgency, product_area, sentiment, is_complaint, suggested_action, summary).
-*   **Database Integration:** `@supabase/supabase-js` provides ORM-like access to PostgreSQL. All environment variables dictate Supabase connections dynamically.
+*   **Ingestion:** Telegram AT protocol via GramJS (`telegram: 2.26.22`) acts as a persistent TCP listener for live messages. A background cron (`runAutoFetch`) also acts as a periodic sweeper every 15 minutes to recover missed payloads.
+*   **AI Service:** Groq API (`llama-3.1-8b-instant`) acts as the natural language understanding agent to classify text into structured JSON shapes with 7 parameters (category, urgency, product_area, sentiment, is_complaint, suggested_action, summary).
+*   **Database Integration:** `@supabase/supabase-js` provides ORM-like access to PostgreSQL. `SUPABASE_SERVICE_ROLE_KEY` is explicitly enforced to maintain backend authority and bypass RLS correctly on integrations.
 *   **Bundling/Transpilation:** Development utilizes `tsx` for on-the-fly TS execution. Production builds are bundled with `esbuild`, enabling full ESM to CJS translation in a single `dist/server.cjs` file to bypass ES Module restrictions natively.
 
 ### 2.2 Frontend (React 19 + Vite)
@@ -38,6 +38,17 @@ During the audit and iterative development process, several severe security limi
 ### 3.3 Defensive Coding Against Payload Anomalies
 *   **Safe JSON Parsing Pipeline:** `App.tsx`'s `apiFetch` was deeply refactored to validate the `Content-Type: application/json` header prior to invoking `res.json()`. This structurally resolves the infamous `Unexpected token '<'` error natively caused by SPAs fetching uncaught 502/HTML errors or navigating dead routes.
 *   **Type Coercion via Validation:** The Groq AI output is fed through an internal `validateTicketSchema` which normalizes unpredictable Enums (like falling back incorrect `urgency` outputs to `"Medium"`), preventing Postgres Type Constraint Violations on INSERT operations.
+*   **Stale Data Cache Elimination:** Explicit `Cache-Control: no-store` HTTP headers are emitted from the Express `GET /api/tickets` router, while `fetch` init options employ `{ cache: 'no-store' }`. This prevents proxy or browser-level caching from delivering stale representations to the frontend.
+
+### 3.4 LLM Rate Limiting & Backpressure Routing
+When utilizing Groq's high-speed inference tier, rate limits cap concurrent throughput at 30 RPM (Requests Per Minute). 
+*   **Sequential Iteration:** Rather than emitting parallel API queries (`Promise.all`) during bulk backfills (`/api/backfill`), generation requests traverse a strictly constrained sequential iterator with an explicit synchronous `setTimeout(2100)` wait gate between iterations, strictly enforcing ~28 RPM throughput without dropping payloads.
+*   **Deduplication:** Raw message IDs and Telegram hashes act as unique indices within Postgres to isolate duplicate historic drops prior to expensive LLM routing.
+
+### 3.5 Categorization Accuracy & Extraction Filters
+To maintain a high signal-to-noise ratio in the dashboard without silently discarding user messages:
+*   **LLM System Prompt injection**: The full JSON schema is stringified into the Groq Llama 3 prompt to ensure categorical compliance (preventing hallucinations of schemas like `priority` instead of `urgency`).
+*   **Extraction Filtering**: The `/api/backfill` API exposes a `minUrgency` parameter. When backfilling thousands of historical Telegram messages, operators can configure the system to sequentially discard `Low`/`Medium` severity outputs, writing only `High` or `Critical` tickets into the database.
 
 ## 4. Telemetry & Auditing
 *   **Audit Logging:** Critical mutations implement asynchronous write-behind checks using `logAuditAction()`. Any state change records the `actor_id`, `action`, `previous_state`, `new_state`, and `ip_address` into a dedicated `audit_logs` table (matching migration `002_security_up.sql`).

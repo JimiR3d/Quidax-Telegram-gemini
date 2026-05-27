@@ -23,15 +23,18 @@ The factory is built in three main layers, all working together in one big build
 ### Piece A: The Robot Helper (Backend)
 This is the hidden engine room. We built it using a technology called **Node.js**. 
 *   **The Listener:** It sits and listens to the Telegram chat group all day waiting for new messages.
+*   **The Sweeper (Auto-Fetch):** Sometimes the Listener takes a nap or the internet blinks. The Sweeper wakes up every 15 minutes, checks for any messages the Listener missed, and processes them.
+*   **The Time Machine (Backfill):** If you just connected the factory to a new group, you can press a "Backfill" button to go back in time and process older messages.
 *   **The Artificial Intelligence (Groq):** When a message arrives, the Listener sends it to a super-computer brain (Groq AI). The brain reads the text and replies with an organized summary (Is it an issue? Is the customer angry? How urgent is it?).
+*   **The Filter (Extraction Controls):** If you are backfilling thousands of older messages, you can tell the Time Machine to only pull tickets that the AI considers "Critical" or "High" urgency, skipping over casual conversations.
 
 ### Piece B: The Filing Cabinet (Database)
 After the AI sorts the message, we need a place to store it safely so it doesn't get lost.
-*   We use a filing cabinet called **Supabase**. It saves every single organized ticket and remembers it forever.
+*   We use a filing cabinet called **Supabase**. It saves every single organized ticket and remembers it forever. We use a master Service Role Key here to make sure NO ONE can bypass the doors.
 
 ### Piece C: The TV Screen (Frontend Dashboard)
 This is what you actually see and click on. We built it using a tool called **React**.
-*   It displays colorful charts and lists of all the tickets. 
+*   It displays colorful charts and lists of all the tickets. It explicitly refuses to use "cached" (old) images of the data, forcing the factory to send it the completely fresh data every 5 seconds.
 *   It lets human workers click "Resolve" when a ticket is fixed.
 *   It is styled using **Tailwind CSS** to make it look beautiful and modern.
 
@@ -43,6 +46,9 @@ We don't want bad guys or confused people messing up our filing cabinet! So, we 
 
 ### 🛡️ The Bouncers (Rate Limiting)
 If someone tries to knock on our factory doors 1,000 times in one minute, our bouncer blocks them and says "You are knocking too fast, come back later!" This stops hackers from breaking our doors down.
+
+### 🛡️ The AI Speed Limit (Throttling)
+Even the super-computer brain gets tired if we ask it 100 questions at the exact same second. We added a Speed Limit to make sure the machine asks the brain only ONE question every 2 seconds. If we are backfilling hundreds of old messages, we queue them up neatly in a line so the brain never crashes.
 
 ### 🛡️ The Secret Key (Authentication)
 To look at the TV Screen Dashboard, you MUST have a secret password (an Access Key). If you try to guess the wrong password, the TV screen stays locked securely.
