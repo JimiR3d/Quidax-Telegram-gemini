@@ -5,7 +5,7 @@ const payload = JSON.stringify({ a: 'a'.repeat(60000) });
 const req = http.request('http://127.0.0.1:3000/api/ingest', {
   method: 'POST',
   headers: {
-    'x-admin-key': 'quidax2026',
+    'x-admin-key': 'YOUR_ADMIN_PASSWORD',
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(payload)
   }

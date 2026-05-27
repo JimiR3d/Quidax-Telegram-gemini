@@ -38,7 +38,7 @@ To build our fortress, we didn't use wood or stone. We used pure code. Here are 
 When we first built this, we made some silly mistakes. My boss pointed them out, and we fixed every single one. Here's exactly how we fixed them:
 
 ### Oopsie #1: One Key for the Whole Castle (Binary Access Control)
-*   **The Mistake:** We had ONE password. If you knew the word "quidax2026", you were the king. You could see everything. If you didn't, you were locked out. This is terrible because what if you just want to hire a janitor? The janitor shouldn't have the king's crown!
+*   **The Mistake:** We had ONE password. If you knew the word "YOUR_ADMIN_PASSWORD", you were the king. You could see everything. If you didn't, you were locked out. This is terrible because what if you just want to hire a janitor? The janitor shouldn't have the king's crown!
 *   **The Fix: RBAC (Role-Based Access Control).** We gave everyone special name tags. 
     *   The `super_admin` name tag lets you rule the whole kingdom.
     *   The `support_agent` name tag only lets you fix problems in your specific room.

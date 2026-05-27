@@ -59,6 +59,15 @@ export default function App() {
   
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [itemsPerPage, setItemsPerPage] = useState<number>(20);
+  const [notification, setNotification] = useState<{message: string, visible: boolean, type: 'success' | 'info'}>({message: "", visible: false, type: 'success'});
+
+  const showNotification = (message: string, type: 'success' | 'info' = 'success') => {
+    setNotification({ message, visible: true, type });
+    setTimeout(() => {
+      setNotification(prev => ({ ...prev, visible: false }));
+    }, 5000);
+  };
+
 
   // Reset to first page whenever filters change
   useEffect(() => {
@@ -79,6 +88,7 @@ export default function App() {
   // Custom api abstraction to handle headers easily
   const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
     const res = await fetch(endpoint, {
+      cache: 'no-store', // ensures browser doesn't cache responses, so we always get fresh data
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -119,8 +129,8 @@ export default function App() {
 
   const simulateTicketingIntegration = (ticket: any) => {
     // Note: Quidax Zendesk Integration via API Simulation
-    alert(`[Quidax API Integration]\n\nPulseDesk is automatically sending a POST request to Quidax's External Ticketing API (e.g., Zendesk)...\n\nTicket #${ticket.id} details pushed. Sync successful.\n\nStatus automatically marked as 'Escalated'.`);
-    handleUpdateStatus(ticket.id, 'Resolved');
+    showNotification(`Ticket #${ticket.id.substring(0, 8)} successfully pushed to Zendesk API. Marked as In Review.`, 'success');
+    handleUpdateStatus(ticket.id, 'In Review');
   };
 
   const verifyLogin = async (e?: React.FormEvent) => {
@@ -371,6 +381,14 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12">
+      {/* Toast Notification */}
+      <div className={`fixed top-4 right-4 z-50 transform transition-all duration-300 ${notification.visible ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0 pointer-events-none'}`}>
+        <div className={`flex items-center space-x-3 px-4 py-3 rounded-lg shadow-2xl backdrop-blur-md border ${notification.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400'}`}>
+          <CheckCircle className="w-5 h-5" />
+          <span className="text-sm font-medium">{notification.message}</span>
+        </div>
+      </div>
+
       <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none"></div>
       <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none"></div>
 
@@ -789,13 +807,15 @@ export default function App() {
                                       <div className="text-sm text-white/90 font-medium">{ticket.sentiment}</div>
                                     </div>
                                     <div className="col-span-2 mt-2">
-                                       <button
-                                         onClick={() => simulateTicketingIntegration(ticket)}
+                                       <a
+                                         href={encodeURI(`mailto:support@quidax.com?subject=Escalated [${ticket.urgency}] Support Ticket: ${ticket.category}`)}
+                                         target="_blank"
+                                         rel="noopener noreferrer"
                                          className="w-full mb-2 flex items-center justify-center py-2.5 px-4 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white font-medium text-sm transition font-bold"
                                        >
                                          <Send className="w-4 h-4 mr-2" />
-                                         Auto-Create Zendesk Ticket (API)
-                                       </button>
+                                         Email Support
+                                       </a>
                                        <div className="flex space-x-2">
                                           <button
                                             onClick={() => handleUpdateStatus(ticket.id, 'Resolved')}
@@ -804,15 +824,13 @@ export default function App() {
                                             <CheckCircle className="w-4 h-4 mr-2" />
                                             Mark Resolved
                                           </button>
-                                          <a
-                                            href={encodeURI(`mailto:support@quidax.com?subject=Escalated [${ticket.urgency}] Support Ticket: ${ticket.category}`)}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
+                                          <button
+                                            onClick={() => simulateTicketingIntegration(ticket)}
                                             className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-white/5 hover:bg-white/10 text-white/80 font-medium text-sm transition border border-white/10"
                                           >
                                             <Send className="w-4 h-4 mr-2" />
-                                            Email Support
-                                          </a>
+                                            Auto-Create Zendesk Ticket
+                                          </button>
                                        </div>
                                     </div>
                                   </div>

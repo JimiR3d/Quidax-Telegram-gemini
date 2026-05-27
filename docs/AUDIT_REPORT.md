@@ -6,7 +6,7 @@ This is a formal review of the PulseDesk codebase against the 10 core architectu
 
 ### 1. Access control is binary
 **Status: Failed.**
-Access control in PulseDesk is completely binary and shared. `server.ts` uses a single `requireAuth` middleware that checks against a single environment variable (`VITE_DASHBOARD_PASSWORD = quidax2026`). 
+Access control in PulseDesk is completely binary and shared. `server.ts` uses a single `requireAuth` middleware that checks against a single environment variable (`VITE_DASHBOARD_PASSWORD = YOUR_ADMIN_PASSWORD`). 
 *   **Issues**: There is no concept of users, teams, or scopes. You are either a global super-admin or you are blocked. If someone gets the password, they can view, modify, and ingest tickets across *all* communities.
 *   **Fix**: Implement true stateless JWTs or session-based authentication (via Supabase Auth) with a `roles` table. Permissions should be mapped to `tenant_id` (Telegram Group ID).
 

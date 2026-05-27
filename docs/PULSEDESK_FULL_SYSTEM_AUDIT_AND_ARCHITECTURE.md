@@ -37,7 +37,7 @@ This document serves as an exhaustive, pixel-perfect, microscopic deep-dive into
 Early iterations of the project suffered from critical gaps. We received exact feedback regarding 10 major mistakes. Here is the microscopic breakdown of how each was permanently resolved:
 
 ### 3.1 Mistake: Binary Access Control
-*   **The Flaw**: The system relied on a single password (`VITE_DASHBOARD_PASSWORD = quidax2026`). If you had it, you were a god. If you didn't, you were blocked. No concept of specific users.
+*   **The Flaw**: The system relied on a single password (`VITE_DASHBOARD_PASSWORD = YOUR_ADMIN_PASSWORD`). If you had it, you were a god. If you didn't, you were blocked. No concept of specific users.
 *   **The Fix**: Implemented **Role-Based Access Control (RBAC)**.
     *   We created a `users` table via migration with `role` (Enum: `super_admin`, `support`, `viewer`) and `tenant_id` columns.
     *   The `server.ts` was refactored to include a `getAuthContext(req)` function and a robust `requireAuth` middleware. This decodes headers/JWTs and attaches a hydrated `req.user` object to every API request containing their exact role and bound community.

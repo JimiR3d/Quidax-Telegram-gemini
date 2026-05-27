@@ -4,7 +4,7 @@ const req = http.request('http://127.0.0.1:3000/api/backfill', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'x-admin-key': 'quidax2026'
+    'x-admin-key': 'YOUR_ADMIN_PASSWORD'
   }
 }, res => {
   let data = '';

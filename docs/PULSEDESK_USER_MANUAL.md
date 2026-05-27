@@ -60,7 +60,7 @@ This is how it works under normal operation:
 ### Method 2: The Manual Ingestion Override (Simulated API)
 To test the system without actually spamming a real Telegram group, we engineered a secure backdoor endpoint.
 1. Send a POST request to `/api/ingest`.
-2. Provide the `x-admin-key: quidax2026` security header.
+2. Provide the `x-admin-key: YOUR_ADMIN_PASSWORD` security header.
 3. Pass a JSON body like: `{"text": "Is the mobile app down for anyone else?"}`.
 4. The system will artificially route this text through the exact same AI brain and database as a real Telegram message.
 

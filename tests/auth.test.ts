@@ -8,8 +8,8 @@ app.use(express.json());
 
 const getAuthContext = (req: express.Request) => {
   const key = req.headers['x-admin-key'] as string;
-  if (key === 'quidax2026') return { role: 'super_admin', tenantId: null, userId: 'sys_admin' };
-  if (key === 'support2026') return { role: 'support', tenantId: 'OfficialQuidaxCommunity', userId: 'support_user_1' };
+  if (key === 'YOUR_ADMIN_PASSWORD') return { role: 'super_admin', tenantId: null, userId: 'sys_admin' };
+  if (key === 'YOUR_SUPPORT_PASSWORD') return { role: 'support', tenantId: 'OfficialQuidaxCommunity', userId: 'support_user_1' };
   return null;
 };
 
@@ -42,7 +42,7 @@ describe('Security & Access Control Tests', () => {
   it('should allow support users and scope to their tenant', async () => {
     const res = await request(app)
       .get('/api/tickets')
-      .set('x-admin-key', 'support2026');
+      .set('x-admin-key', 'YOUR_SUPPORT_PASSWORD');
     expect(res.status).toBe(200);
     expect(res.body[0].group_id).toBe('OfficialQuidaxCommunity');
   });
@@ -50,7 +50,7 @@ describe('Security & Access Control Tests', () => {
   it('should allow admin users full access', async () => {
     const res = await request(app)
       .get('/api/tickets')
-      .set('x-admin-key', 'quidax2026');
+      .set('x-admin-key', 'YOUR_ADMIN_PASSWORD');
     expect(res.status).toBe(200);
   });
 });
