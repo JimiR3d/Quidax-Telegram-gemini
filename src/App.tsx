@@ -201,7 +201,10 @@ export default function App() {
       const res = await apiFetch(url);
       const data = await res.json();
       if (Array.isArray(data)) {
-        setTickets(data);
+        setTickets(prev => {
+          if (JSON.stringify(prev) === JSON.stringify(data)) return prev;
+          return data;
+        });
       }
     } catch (e: any) {
       if (e?.message !== "Failed to fetch") console.error(e);

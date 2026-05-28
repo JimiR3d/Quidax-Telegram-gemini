@@ -285,7 +285,7 @@ async function startServer() {
     
     // Call Groq API with an alternative model with higher limits!
     const response = await openai.chat.completions.create({
-      model: "llama-3.1-8b-instant", 
+      model: "llama-3.3-70b-versatile", 
       messages: [
         { role: "system", content: `You are a ticket classifier. Respond ONLY with a raw JSON object matching this schema. Never put markdown ticks around the JSON. Never output conversational text. Schema: ${JSON.stringify(responseSchema.json_schema.schema, null, 2)}` },
         { role: "user", content: sanitizeForPrompt(text) }
