@@ -1,21 +1,28 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { format, subDays, startOfDay, isToday, isYesterday, parseISO } from "date-fns";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
-import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock, ExternalLink, X } from "lucide-react";
 
-// Types
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// TYPES
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 type Ticket = {
   id: string;
   summary: string;
   category: string;
-  urgency: 'Critical' | 'High' | 'Medium' | 'Low';
+  urgency: "Critical" | "High" | "Medium" | "Low";
   product_area: string;
   sentiment: string;
   is_complaint: boolean;
   suggested_action: string;
-  status: 'Open' | 'In Review' | 'Resolved' | 'Dismissed';
+  status: "Open" | "In Review" | "Resolved" | "Dismissed" | "Classifying";
   raw_text: string;
   created_at: string;
+  suggested_reply?: string | null;
+  telegram_deep_link?: string | null;
+  telegram_message_id?: string | null;
+  jira_issue_key?: string | null;
+  jira_issue_url?: string | null;
 };
 
 type Community = {
@@ -24,82 +31,179 @@ type Community = {
   display_name: string;
 };
 
-// Colors for charts
-const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#f43f5e', '#8b5cf6', '#ec4899', '#14b8a6', '#64748b'];
-const URGENCY_COLORS = { Critical: 'bg-rose-500', High: 'bg-amber-500', Medium: 'bg-indigo-500', Low: 'bg-blue-500' };
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// CONSTANTS
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const COLORS = ["#6366f1", "#10b981", "#f59e0b", "#f43f5e", "#8b5cf6", "#ec4899", "#14b8a6", "#64748b"];
+const URGENCY_COLORS: Record<string, string> = {
+  Critical: "bg-rose-500",
+  High:     "bg-amber-500",
+  Medium:   "bg-indigo-500",
+  Low:      "bg-blue-500",
+};
 
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// T3-A: FIELD-LEVEL DIFF GUARD
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function haveTicketsChanged(prev: Ticket[], next: Ticket[]): boolean {
+  if (prev.length !== next.length) return true;
+  for (let i = 0; i < next.length; i++) {
+    const p = prev[i];
+    const n = next[i];
+    if (
+      p.id            !== n.id            ||
+      p.status        !== n.status        ||
+      p.urgency       !== n.urgency       ||
+      p.summary       !== n.summary       ||
+      p.suggested_reply !== n.suggested_reply ||
+      p.jira_issue_key !== n.jira_issue_key
+    ) return true;
+  }
+  return false;
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// T3-C: ERROR BOUNDARY
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+type ErrState = { hasError: boolean; error?: Error };
+type ErrProps = { children: React.ReactNode; fallback?: React.ReactNode };
+
+class ErrorBoundary extends React.Component<ErrProps, ErrState> {
+  declare props: ErrProps;
+  declare state: ErrState;
+
+  constructor(props: ErrProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(error: Error): ErrState {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("[ErrorBoundary]", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-sm">
+          <AlertTriangle className="inline w-4 h-4 mr-2" />
+          Something went wrong in this section. Please refresh the page.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// MAIN APP
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export default function App() {
-  const [adminKey, setAdminKey] = useState<string>(localStorage.getItem('PULSEDESK_ADMIN_KEY') || "");
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(!!localStorage.getItem('PULSEDESK_ADMIN_KEY'));
-  const [authError, setAuthError] = useState<string>("");
-  const [authLoading, setAuthLoading] = useState<boolean>(false);
+  // â”€â”€ Auth State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    // New: check sessionStorage pd_token; fallback: old localStorage key
+    return !!(sessionStorage.getItem("pd_token") || localStorage.getItem("PULSEDESK_ADMIN_KEY"));
+  });
+  const [passwordInput, setPasswordInput] = useState<string>("");
+  const [authError, setAuthError]         = useState<string>("");
+  const [authLoading, setAuthLoading]     = useState<boolean>(false);
 
-  const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [communities, setCommunities] = useState<Community[]>([]);
+  // â”€â”€ Dashboard State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [tickets, setTickets]               = useState<Ticket[]>([]);
+  const [communities, setCommunities]       = useState<Community[]>([]);
   const [selectedCommunity, setSelectedCommunity] = useState<string>("");
-  const [loading, setLoading] = useState(true);
-  
-  // Simulator state
-  const [simMessage, setSimMessage] = useState("");
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [isBackfilling, setIsBackfilling] = useState(false);
-  const [backfillStatus, setBackfillStatus] = useState<{message: string, isError: boolean} | null>(null);
-  const [backfillLimit, setBackfillLimit] = useState<number>(50);
-  const [backfillDays, setBackfillDays] = useState<number>(7);
+  const [loading, setLoading]               = useState(true);
+  const [demoModeBanner, setDemoModeBanner] = useState<boolean>(true);
+  const [isDemoMode, setIsDemoMode]         = useState<boolean>(false);
+
+  // â”€â”€ Simulator State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [simMessage, setSimMessage]             = useState("");
+  const [isSimulating, setIsSimulating]         = useState(false);
+  const [isBackfilling, setIsBackfilling]       = useState(false);
+  const [backfillStatus, setBackfillStatus]     = useState<{ message: string; isError: boolean } | null>(null);
+  const [backfillLimit, setBackfillLimit]       = useState<number>(50);
+  const [backfillDays, setBackfillDays]         = useState<number>(7);
   const [backfillMinUrgency, setBackfillMinUrgency] = useState<string>("All");
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
+  const [jiraLoading, setJiraLoading]           = useState<Record<string, boolean>>({});
 
-  // Filters state
-  const [filterCategory, setFilterCategory] = useState<string>("All");
-  const [filterUrgency, setFilterUrgency] = useState<string>("All");
-  const [filterStatus, setFilterStatus] = useState<string>("All");
-  const [filterDays, setFilterDays] = useState<string>("All");
-  const [filterStartDate, setFilterStartDate] = useState<string>("");
-  const [filterEndDate, setFilterEndDate] = useState<string>("");
-  const [searchQuery, setSearchQuery] = useState<string>("");
-  
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const [itemsPerPage, setItemsPerPage] = useState<number>(20);
-  const [notification, setNotification] = useState<{message: string, visible: boolean, type: 'success' | 'info'}>({message: "", visible: false, type: 'success'});
+  // â”€â”€ Issues-Only filter (default ON â€” hides General Question, Praise, Spam) â”€â”€
+  const [showIssuesOnly, setShowIssuesOnly] = useState<boolean>(true);
 
-  const showNotification = (message: string, type: 'success' | 'info' = 'success') => {
+  // â”€â”€ Backfill progress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [backfillProgress, setBackfillProgress] = useState<{ running: boolean; total: number; done: number; ingested: number; skipped: number } | null>(null);
+  const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // â”€â”€ Benchmark state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [evalResults, setEvalResults]   = useState<any>(null);
+  const [evalLoading, setEvalLoading]   = useState<boolean>(false);
+  const [showBenchmark, setShowBenchmark] = useState<boolean>(false);;
+
+  // â”€â”€ Filters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [filterCategory, setFilterCategory]     = useState<string>("All");
+  const [filterUrgency, setFilterUrgency]       = useState<string>("All");
+  const [filterStatus, setFilterStatus]         = useState<string>("All");
+  const [filterDays, setFilterDays]             = useState<string>("30");
+  const [filterStartDate, setFilterStartDate]   = useState<string>("");
+  const [filterEndDate, setFilterEndDate]       = useState<string>("");
+  const [searchQuery, setSearchQuery]           = useState<string>("");
+  const [urgencyFilter, setUrgencyFilter]       = useState<string>("All"); // Feature 7 quick filter
+
+  // â”€â”€ Pagination â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [currentPage, setCurrentPage]     = useState<number>(1);
+  const [itemsPerPage, setItemsPerPage]   = useState<number>(20);
+  const [totalTickets, setTotalTickets]   = useState<number>(0);
+  const [globalStats, setGlobalStats]     = useState<any>(null);
+
+  // â”€â”€ Notification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [notification, setNotification] = useState<{ message: string; visible: boolean; type: "success" | "info" }>({
+    message: "", visible: false, type: "success",
+  });
+
+  const showNotification = useCallback((message: string, type: "success" | "info" = "success") => {
     setNotification({ message, visible: true, type });
-    setTimeout(() => {
-      setNotification(prev => ({ ...prev, visible: false }));
-    }, 5000);
-  };
+    setTimeout(() => setNotification(prev => ({ ...prev, visible: false })), 5000);
+  }, []);
 
+  // â”€â”€ Token helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const getToken = useCallback((): string => {
+    return sessionStorage.getItem("pd_token") || localStorage.getItem("PULSEDESK_ADMIN_KEY") || "";
+  }, []);
 
-  // Reset to first page whenever filters change
+  // â”€â”€ Reset page on filter change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     setCurrentPage(1);
-  }, [filterCategory, filterUrgency, filterStatus, filterDays, filterStartDate, filterEndDate, searchQuery, itemsPerPage]);
+  }, [filterCategory, filterUrgency, filterStatus, filterDays, filterStartDate, filterEndDate, searchQuery, itemsPerPage, urgencyFilter]);
 
-  const formatTicketDate = (dateStr: string) => {
+  const formatTicketDate = useCallback((dateStr: string) => {
     try {
       const d = parseISO(dateStr);
-      if (isToday(d)) return `Today, ${format(d, 'HH:mm')}`;
-      if (isYesterday(d)) return `Yesterday, ${format(d, 'HH:mm')}`;
-      return format(d, 'MMM d, HH:mm');
+      if (isToday(d))     return `Today, ${format(d, "HH:mm")}`;
+      if (isYesterday(d)) return `Yesterday, ${format(d, "HH:mm")}`;
+      return format(d, "MMM d, HH:mm");
     } catch {
       return dateStr;
     }
-  };
+  }, []);
 
-  // Custom api abstraction to handle headers easily
-  const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
+  // â”€â”€ apiFetch â€” reads token from sessionStorage / localStorage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const apiFetch = useCallback(async (endpoint: string, options: RequestInit = {}) => {
+    const token = getToken();
     const res = await fetch(endpoint, {
-      cache: 'no-store', // ensures browser doesn't cache responses, so we always get fresh data
+      cache: "no-store",
       ...options,
       headers: {
-        'Content-Type': 'application/json',
-        'x-admin-key': adminKey,
-        ...(options.headers || {})
-      }
+        "Content-Type": "application/json",
+        ...(token.length === 64
+          ? { Authorization: `Bearer ${token}` }        // new: 64-char hex token
+          : { "x-admin-key": token }),                   // legacy: raw password
+        ...(options.headers || {}),
+      },
     });
     if (res.status === 401) {
       setIsAuthenticated(false);
-      localStorage.removeItem('PULSEDESK_ADMIN_KEY');
+      sessionStorage.removeItem("pd_token");
+      localStorage.removeItem("PULSEDESK_ADMIN_KEY");
       throw new Error("Unauthorized");
     }
     const contentType = res.headers.get("content-type");
@@ -108,57 +212,39 @@ export default function App() {
       throw new Error(`API Error: Expected JSON but got ${contentType} on ${endpoint}: ${text.substring(0, 50)}`);
     }
     return res;
-  };
+  }, [getToken]);
 
-  const handleUpdateStatus = async (ticketId: string, newStatus: string) => {
-    try {
-      const res = await apiFetch(`/api/tickets/${ticketId}/status`, {
-        method: "POST",
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (res.ok) {
-        fetchTickets();
-      } else {
-        const errorData = await res.json();
-        alert(`Failed to update status: ${errorData.error}`);
-      }
-    } catch (e) {
-      console.error(e);
-      alert("Failed to update status.");
-    }
-  };
-
-  const simulateTicketingIntegration = (ticket: any) => {
-    // Note: Quidax Zendesk Integration via API Simulation
-    showNotification(`Ticket #${ticket.id.substring(0, 8)} successfully pushed to Zendesk API. Marked as In Review.`, 'success');
-    handleUpdateStatus(ticket.id, 'In Review');
-  };
-
-  const verifyLogin = async (e?: React.FormEvent) => {
+  // â”€â”€ T1-B: Login handler (calls POST /api/auth/login) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!adminKey.trim()) return;
+    if (!passwordInput.trim()) return;
     setAuthLoading(true);
     setAuthError("");
-    
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-    
+    const timeoutId  = setTimeout(() => controller.abort(), 10_000);
+
     try {
-      const res = await fetch('/api/auth/verify', { 
-        headers: { 'x-admin-key': adminKey },
-        signal: controller.signal
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: passwordInput }),
+        signal: controller.signal,
       });
       clearTimeout(timeoutId);
-      
+
       if (res.ok) {
+        const { token } = await res.json();
+        sessionStorage.setItem("pd_token", token);
+        localStorage.removeItem("PULSEDESK_ADMIN_KEY"); // clean up legacy key
         setIsAuthenticated(true);
-        localStorage.setItem('PULSEDESK_ADMIN_KEY', adminKey);
+        setPasswordInput("");
       } else {
-        setAuthError("Invalid access key or Insufficient Permissions");
+        setAuthError("Invalid access key or insufficient permissions");
       }
     } catch (e: any) {
       clearTimeout(timeoutId);
-      if (e.name === 'AbortError') {
+      if (e.name === "AbortError") {
         setAuthError("Request timed out. Please check your connection.");
       } else {
         setAuthError("Network error. Make sure the backend is running.");
@@ -168,23 +254,31 @@ export default function App() {
     }
   };
 
+  const handleLogout = useCallback(async () => {
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch { /* best-effort */ }
+    sessionStorage.removeItem("pd_token");
+    localStorage.removeItem("PULSEDESK_ADMIN_KEY");
+    setIsAuthenticated(false);
+    setTickets([]);
+  }, [apiFetch]);
+
+  // â”€â”€ Data fetching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
-    if (isAuthenticated) {
-      fetchCommunities();
-    }
+    if (isAuthenticated) fetchCommunities();
   }, [isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
     fetchTickets();
-    // Poll for new tickets since we moved away from client-side supabase realtime
     const interval = setInterval(fetchTickets, 5000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, selectedCommunity]);
+  }, [isAuthenticated, selectedCommunity, filterUrgency, filterStatus, filterCategory, currentPage, itemsPerPage, showIssuesOnly]);
 
   const fetchCommunities = async () => {
     try {
-      const res = await apiFetch('/api/communities');
+      const res  = await apiFetch("/api/communities");
       const data = await res.json();
       if (data && data.length > 0) {
         setCommunities(data);
@@ -195,77 +289,107 @@ export default function App() {
     }
   };
 
-  const fetchTickets = async () => {
+  const fetchTickets = useCallback(async () => {
     try {
-      const url = selectedCommunity ? `/api/tickets?group_id=${encodeURIComponent(selectedCommunity)}` : '/api/tickets';
-      const res = await apiFetch(url);
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setTickets(prev => {
-          if (JSON.stringify(prev) === JSON.stringify(data)) return prev;
-          return data;
-        });
+      const params = new URLSearchParams();
+      if (selectedCommunity) params.set("group_id", selectedCommunity);
+      if (filterUrgency  !== "All") params.set("urgency",  filterUrgency);
+      if (urgencyFilter !== "All") params.set("urgency", urgencyFilter);
+      if (filterStatus   !== "All") params.set("status",   filterStatus);
+      if (filterCategory !== "All") params.set("category", filterCategory);
+      if (showIssuesOnly)            params.set("issues_only", "true");
+      
+      if (filterDays !== "All") params.set("days", filterDays);
+      if (filterDays === "Custom") {
+        if (filterStartDate) params.set("startDate", filterStartDate);
+        if (filterEndDate) params.set("endDate", filterEndDate);
       }
+      if (searchQuery.trim()) params.set("search", searchQuery.trim());
+
+      params.set("page",     String(currentPage - 1));
+      params.set("pageSize", String(itemsPerPage));
+
+      const res  = await apiFetch(`/api/tickets?${params.toString()}`);
+      const data = await res.json();
+
+      const newTickets: Ticket[] = Array.isArray(data) ? data : (data.tickets ?? []);
+      const total: number        = Array.isArray(data) ? data.length : (data.total ?? 0);
+      if (!Array.isArray(data) && data.stats) {
+        setGlobalStats(data.stats);
+      }
+
+      // Feature 5: detect demo mode
+      setIsDemoMode(newTickets.length > 0 && String(newTickets[0]?.id).startsWith("demo-"));
+
+      setTickets(prev => haveTicketsChanged(prev, newTickets) ? newTickets : prev);
+      setTotalTickets(total);
     } catch (e: any) {
       if (e?.message !== "Failed to fetch") console.error(e);
     } finally {
       setLoading(false);
     }
-  };
+  }, [apiFetch, selectedCommunity, filterUrgency, filterStatus, filterCategory, currentPage, itemsPerPage, showIssuesOnly]);
 
-  const updateTicketStatus = async (id: string, newStatus: string) => {
+  // â”€â”€ Ticket actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleUpdateStatus = useCallback(async (ticketId: string, newStatus: string) => {
     try {
-      await apiFetch(`/api/tickets/${id}/status`, {
-        method: 'POST',
-        body: JSON.stringify({ status: newStatus })
+      const res = await apiFetch(`/api/tickets/${ticketId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status: newStatus }),
       });
-      // Optimistic update
-      setTickets(prev => prev.map(t => t.id === id ? { ...t, status: newStatus as any } : t));
+      if (res.ok) {
+        setTickets(prev => prev.map(t => t.id === ticketId ? { ...t, status: newStatus as any } : t));
+      } else {
+        const err = await res.json();
+        alert(`Failed to update status: ${err.error}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to update status.");
+    }
+  }, [apiFetch]);
+
+  // Feature 4: Create Jira ticket
+  const handleCreateJiraTicket = useCallback(async (ticketId: string) => {
+    setJiraLoading(prev => ({ ...prev, [ticketId]: true }));
+    try {
+      const res  = await apiFetch(`/api/tickets/${ticketId}/jira`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showNotification(`Jira issue ${data.jira_issue_key} created!`, "success");
+        setTickets(prev => prev.map(t =>
+          t.id === ticketId
+            ? { ...t, jira_issue_key: data.jira_issue_key, jira_issue_url: data.jira_issue_url }
+            : t
+        ));
+      } else {
+        alert(`Failed to create Jira issue: ${data.error}`);
+      }
     } catch (e: any) {
       if (e?.message !== "Failed to fetch") console.error(e);
-      alert("Failed to update status");
+      alert("Failed to reach Jira API.");
+    } finally {
+      setJiraLoading(prev => ({ ...prev, [ticketId]: false }));
     }
-  };
+  }, [apiFetch, showNotification]);
 
-  // Derivative calculations
-  const filteredTickets = tickets.filter(t => {
-    if (filterCategory !== "All" && t.category?.trim().toLowerCase() !== filterCategory.toLowerCase()) return false;
-    if (filterUrgency !== "All" && t.urgency?.trim().toLowerCase() !== filterUrgency.toLowerCase()) return false;
-    if (filterStatus !== "All" && t.status?.trim().toLowerCase() !== filterStatus.toLowerCase()) return false;
-    
-    if (filterDays !== "All" && filterDays !== "Custom") {
-      const days = parseInt(filterDays);
-      const thresholdDate = subDays(startOfDay(new Date()), days - 1);
-      if (t.created_at && parseISO(t.created_at) < thresholdDate) return false;
-    }
-    
-    if (filterDays === "Custom") {
-      if (filterStartDate && t.created_at && parseISO(t.created_at) < parseISO(filterStartDate)) return false;
-      if (filterEndDate && t.created_at && parseISO(t.created_at) > parseISO(filterEndDate)) return false;
-    }
-    
-    if (searchQuery.trim()) {
-      const sq = searchQuery.toLowerCase();
-      const matchesSummary = t.summary?.toLowerCase().includes(sq);
-      const matchesText = t.raw_text?.toLowerCase().includes(sq);
-      if (!matchesSummary && !matchesText) return false;
-    }
-    
-    return true;
-  }).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
+  // â”€â”€ Filtering (client-side on top of server filters) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const filteredTickets = useMemo(() => {
+    return tickets;
+  }, [tickets]);
+  // â”€â”€ Simulator / Backfill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const simulateIngestion = async () => {
     if (!simMessage.trim()) return;
     setIsSimulating(true);
     try {
-      const res = await apiFetch('/api/ingest', {
-        method: 'POST',
-        body: JSON.stringify({ text: simMessage, telegramId: Math.floor(Math.random() * 999999) })
+      const res  = await apiFetch("/api/ingest", {
+        method: "POST",
+        body: JSON.stringify({ text: simMessage, telegramId: Math.floor(Math.random() * 999_999) }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
         setSimMessage("");
-        fetchTickets(); // fetch latest
+        fetchTickets();
       } else {
         alert("Error ingesting: " + data.error);
       }
@@ -279,249 +403,334 @@ export default function App() {
   const handleBackfill = async () => {
     setIsBackfilling(true);
     setBackfillStatus(null);
+    setBackfillProgress(null);
     try {
-      const res = await apiFetch('/api/backfill', {
-        method: 'POST',
-        body: JSON.stringify({ limit: backfillLimit, days: backfillDays, minUrgency: backfillMinUrgency })
+      const res  = await apiFetch("/api/backfill", {
+        method: "POST",
+        body: JSON.stringify({ limit: backfillLimit, days: backfillDays, minUrgency: backfillMinUrgency }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        setBackfillStatus({ message: data.message || `Backfill complete: Processed ${data.processed} messages, skipped ${data.skipped}.`, isError: false });
-        fetchTickets(); // fetch latest
+        setBackfillStatus({ message: data.message || `Backfill started.`, isError: false });
+        // Poll progress every 2 seconds
+        if (backfillPollRef.current) clearInterval(backfillPollRef.current);
+        backfillPollRef.current = setInterval(async () => {
+          try {
+            const pr = await apiFetch("/api/backfill/progress");
+            const pd = await pr.json();
+            setBackfillProgress(pd);
+            if (!pd.running) {
+              clearInterval(backfillPollRef.current!);
+              backfillPollRef.current = null;
+              setIsBackfilling(false);
+              fetchTickets();
+              setBackfillStatus({ message: `âœ… Done: ${pd.ingested} classified, ${pd.skipped} skipped out of ${pd.total}`, isError: false });
+            }
+          } catch { /* silent */ }
+        }, 2000);
       } else {
         setBackfillStatus({ message: "Error during backfill: " + data.error, isError: true });
+        setIsBackfilling(false);
       }
     } catch (e: any) {
       if (e?.message !== "Failed to fetch") console.error(e);
-      setBackfillStatus({ message: "Failed to reach backfill API. Ensure backend is running and Telegram is connected.", isError: true });
+      setBackfillStatus({ message: "Failed to reach backfill API.", isError: true });
+      setIsBackfilling(false);
     }
-    setIsBackfilling(false);
   };
 
-  // Render Auth Screen Instead of Config Missing Screen
+  // â”€â”€ Run AI accuracy benchmark â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const runBenchmark = async () => {
+    setEvalLoading(true);
+    setEvalResults(null);
+    setShowBenchmark(true);
+    try {
+      const res  = await apiFetch("/api/eval");
+      const data = await res.json();
+      setEvalResults(data);
+    } catch (e: any) {
+      setEvalResults({ error: e.message });
+    }
+    setEvalLoading(false);
+  };
+
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // RENDER: Login Screen
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none"></div>
-        <form onSubmit={verifyLogin} className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-sm w-full relative z-10 flex flex-col items-center">
+        <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
+        <form onSubmit={handleLogin} className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-sm w-full relative z-10 flex flex-col items-center">
           <div className="mb-6 flex justify-center w-full">
-             <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
-               <Lock className="w-8 h-8 text-white" />
-             </div>
+            <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+              <Lock className="w-8 h-8 text-white" />
+            </div>
           </div>
           <h1 className="text-xl font-bold tracking-tight mb-6 text-center w-full">Secure Access Required</h1>
-          
           <div className="w-full space-y-4">
-             <input 
-               type="password"
-               value={adminKey}
-               onChange={e => setAdminKey(e.target.value)}
-               placeholder="Access Key"
-               className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-center tracking-widest font-mono"
-             />
-             {authError && <div className="text-rose-400 text-xs text-center">{authError}</div>}
-             <button type="submit" disabled={authLoading || !adminKey.trim()} className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold rounded-lg px-4 py-3 text-sm transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50">
-               {authLoading ? "Verifying..." : "Unlock Dashboard"}
-             </button>
+            <input
+              id="password-input"
+              type="password"
+              value={passwordInput}
+              onChange={e => setPasswordInput(e.target.value)}
+              placeholder="Access Key"
+              autoComplete="current-password"
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-center tracking-widest font-mono"
+            />
+            {authError && <div className="text-rose-400 text-xs text-center">{authError}</div>}
+            <button
+              id="login-button"
+              type="submit"
+              disabled={authLoading || !passwordInput.trim()}
+              className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold rounded-lg px-4 py-3 text-sm transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+            >
+              {authLoading ? "Verifying..." : "Unlock Dashboard"}
+            </button>
           </div>
         </form>
       </div>
     );
   }
 
-  // Calculate stats
-  const ticketsToday = filteredTickets.filter(t => isToday(parseISO(t.created_at)));
-  const openCount = filteredTickets.filter(t => t.status === 'Open').length;
-  const resolvedCount = filteredTickets.filter(t => t.status === 'Resolved').length;
-  
-  // Dynamic urgency count for the 4th stat box
-  const urgencyCardLabel = filterUrgency === 'All' ? 'Critical Issues' : `${filterUrgency} Issues`;
-  const urgencyCount = filteredTickets.filter(t => {
-    const targetUrgencies = filterUrgency === 'All' ? ['Critical'] : [filterUrgency];
-    return targetUrgencies.includes(t.urgency) && t.status !== 'Resolved' && t.status !== 'Dismissed';
-  }).length;
-  
-  const resolutionRate = filteredTickets.length ? Math.round((resolvedCount / filteredTickets.length) * 100) : 0;
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // STATS
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const ticketsToday    = globalStats?.ticketsTodayCount || 0;
+  const openCount       = globalStats?.openCount || 0;
+  const activeCount     = globalStats?.activeCount || 0;
+  const escalatedCount  = globalStats?.escalatedCount || 0;
+  const resolvedTodayCount = globalStats?.resolvedTodayCount || 0;
+  const resolvedCount   = globalStats?.resolvedCount || 0;
+  const totalIssues     = globalStats ? (globalStats.criticalCount + globalStats.highCount + globalStats.mediumCount + globalStats.lowCount) : 0;
+  const urgencyCount    = globalStats ? (
+    urgencyFilter === "All" ? (globalStats.criticalCount + globalStats.highCount + globalStats.mediumCount + globalStats.lowCount) :
+    urgencyFilter === "High" ? globalStats.highCount :
+    urgencyFilter === "Medium" ? globalStats.mediumCount :
+    urgencyFilter === "Low" ? globalStats.lowCount : 
+    urgencyFilter === "Critical" ? globalStats.criticalCount : 0
+  ) : 0;
+  const resolutionRate  = globalStats?.resolutionRate || 0;
 
-  // Chart Data: Volume over time
+  // â”€â”€ Chart Data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let maxDays = filterDays === "All" ? 30 : filterDays === "Custom" ? 30 : parseInt(filterDays);
   let refDate = new Date();
   if (filterDays === "Custom" && filterStartDate && filterEndDate) {
-     const startD = parseISO(filterStartDate);
-     const endD = parseISO(filterEndDate);
-     if (!isNaN(startD.getTime()) && !isNaN(endD.getTime()) && startD <= endD) {
-       const diffTime = Math.abs(endD.getTime() - startD.getTime());
-       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-       maxDays = Math.min(diffDays, 60);
-       refDate = endD;
-     }
+    const startD = parseISO(filterStartDate);
+    const endD   = parseISO(filterEndDate);
+    if (!isNaN(startD.getTime()) && !isNaN(endD.getTime()) && startD <= endD) {
+      maxDays = Math.min(Math.ceil(Math.abs(endD.getTime() - startD.getTime()) / 86_400_000) + 1, 60);
+      refDate = endD;
+    }
   }
-
-  const volumeData = Array.from({length: maxDays}).map((_, i) => {
-    const d = subDays(refDate, (maxDays - 1) - i);
-    const dateStr = format(d, 'MMM dd');
-    return {
-      date: dateStr,
-      tickets: filteredTickets.filter(t => t.created_at && format(parseISO(t.created_at), 'MMM dd') === dateStr).length
-    };
+  const volumeData = Array.from({ length: maxDays }).map((_, i) => {
+    const d       = subDays(refDate, (maxDays - 1) - i);
+    const dateStr = format(d, "MMM dd");
+    const rawData = globalStats?.rawStatsData || [];
+    return { date: dateStr, tickets: rawData.filter((t: any) => t.created_at && format(parseISO(t.created_at), "MMM dd") === dateStr).length };
   });
 
-  // Chart Data: Category Breakdown
-  const categoryCount = filteredTickets.reduce((acc, t) => {
-    acc[t.category] = (acc[t.category] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-  const categoryData = Object.entries(categoryCount).map(([name, value]) => ({ name, value }));
+  const categoryData = globalStats?.categoryCount ? Object.entries(globalStats.categoryCount).map(([name, value]) => ({ name, value })) : [];
+  const resolutionData = globalStats?.resolutionData || [];
 
-  // Chart Data: Resolution Comparison
-  const resolutionData = [
-    { name: 'Resolved', value: filteredTickets.filter(t => t.status === 'Resolved' || t.status === 'Dismissed').length },
-    { name: 'Open / In Review', value: filteredTickets.filter(t => t.status === 'Open' || t.status === 'In Review').length }
-  ];
+  const totalPages      = Math.ceil(totalTickets / itemsPerPage);
+  const paginatedTickets = filteredTickets;  // server already paginates
 
-  const totalPages = Math.ceil(filteredTickets.length / itemsPerPage);
-  const paginatedTickets = filteredTickets.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
-
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // RENDER: Dashboard
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12">
       {/* Toast Notification */}
-      <div className={`fixed top-4 right-4 z-50 transform transition-all duration-300 ${notification.visible ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0 pointer-events-none'}`}>
-        <div className={`flex items-center space-x-3 px-4 py-3 rounded-lg shadow-2xl backdrop-blur-md border ${notification.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400'}`}>
+      <div className={`fixed top-4 right-4 z-50 transform transition-all duration-300 ${notification.visible ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"}`}>
+        <div className={`flex items-center space-x-3 px-4 py-3 rounded-lg shadow-2xl backdrop-blur-md border ${notification.type === "success" ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"}`}>
           <CheckCircle className="w-5 h-5" />
           <span className="text-sm font-medium">{notification.message}</span>
         </div>
       </div>
 
-      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none"></div>
-      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none"></div>
+      {/* Feature 5: Demo Mode Banner */}
+      {isDemoMode && demoModeBanner && (
+        <div className="relative z-20 bg-amber-500/10 border-b border-amber-500/20 px-6 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold">
+            <AlertTriangle className="w-4 h-4" />
+            <span>DEMO MODE â€” You are viewing sample data. Set <code className="font-mono bg-amber-500/10 px-1 rounded">DEMO_MODE=false</code> to use live data.</span>
+          </div>
+          <button onClick={() => setDemoModeBanner(false)} className="text-amber-400 hover:text-amber-300 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none" />
+      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
 
       {/* Top Nav */}
       <header className="relative z-10 flex items-center justify-between px-6 py-4 mb-2">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
-             <Activity className="w-6 h-6 text-white" />
+            <Activity className="w-6 h-6 text-white" />
           </div>
           <div>
             <h1 className="text-xl font-bold tracking-tight">QUIDAX PULSEDESK</h1>
             <p className="text-[10px] text-indigo-300 font-mono tracking-widest uppercase">Powered by SPICED Values</p>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-4 py-2 rounded-full backdrop-blur-md">
-            <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
-            <select 
+            <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+            <select
               className="bg-transparent text-sm cursor-pointer outline-none text-white appearance-none font-medium [&>option]:text-black"
               value={selectedCommunity}
-              onChange={(e) => setSelectedCommunity(e.target.value)}
+              onChange={e => setSelectedCommunity(e.target.value)}
             >
               {communities.length === 0 && <option value="">Loading communities...</option>}
               {communities.map(c => <option key={c.telegram_group_id} value={c.telegram_group_id}>{c.display_name}</option>)}
             </select>
             <ChevronDown className="w-4 h-4 text-white/40 pointer-events-none" />
           </div>
-          <div className="bg-white/5 border border-white/10 p-2 rounded-full backdrop-blur-md">
+          <button
+            id="open-benchmark"
+            onClick={() => setShowBenchmark(true)}
+            title="AI Accuracy Benchmark"
+            className="bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md hover:bg-indigo-500/10 hover:border-indigo-500/30 transition text-[10px] font-bold text-white/50 hover:text-indigo-300 uppercase tracking-widest flex items-center gap-1.5"
+          >
+            ðŸŽ¯ Benchmark
+          </button>
+          <button
+            onClick={handleLogout}
+            title="Sign out"
+            className="bg-white/5 border border-white/10 p-2 rounded-full backdrop-blur-md hover:bg-white/10 transition"
+          >
             <User className="w-5 h-5 text-white/60" />
-          </div>
+          </button>
         </div>
       </header>
 
       {loading ? (
         <div className="p-12 flex justify-center relative z-10"><div className="animate-spin text-indigo-500"><RefreshCcw /></div></div>
       ) : (
+        <React.Fragment>
         <main className="max-w-7xl mx-auto px-6 space-y-6 w-full relative z-10">
-          
-          {/* Top Panel: Simulator / Actions */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-5 mb-6">
-             <div className="flex justify-between items-center mb-2">
-               <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Test Integration (Simulation)</h2>
-               <div className="flex items-center space-x-2">
-                 <select
-                   value={backfillDays}
-                   onChange={(e) => setBackfillDays(Number(e.target.value))}
-                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
-                   disabled={isBackfilling}
-                 >
-                   <option value={1}>Last 24 Hours</option>
-                   <option value={3}>Last 3 Days</option>
-                   <option value={7}>Last 7 Days</option>
-                   <option value={14}>Last 14 Days</option>
-                   <option value={30}>Last 30 Days</option>
-                 </select>
-                 <select
-                   value={backfillLimit}
-                   onChange={(e) => setBackfillLimit(Number(e.target.value))}
-                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
-                   disabled={isBackfilling}
-                 >
-                   <option value={20}>Max 20</option>
-                   <option value={50}>Max 50</option>
-                   <option value={100}>Max 100</option>
-                   <option value={500}>Max 500</option>
-                 </select>
-                 <select
-                   value={backfillMinUrgency}
-                   onChange={(e) => setBackfillMinUrgency(e.target.value)}
-                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
-                   disabled={isBackfilling}
-                 >
-                   <option value="All">All Urgencies</option>
-                   <option value="Medium">Medium & Above</option>
-                   <option value="High">High & Critical</option>
-                   <option value="Critical">Critical Only</option>
-                 </select>
-                 <button 
-                   onClick={handleBackfill}
-                   disabled={isBackfilling}
-                   className="px-3 py-1 bg-white/10 hover:bg-white/20 transition rounded text-[10px] font-bold uppercase disabled:opacity-50 flex items-center"
-                 >
-                   {isBackfilling ? <RefreshCcw className="w-3 h-3 animate-spin mr-1" /> : <Clock className="w-3 h-3 mr-1" />}
-                   Sync History Data
-                 </button>
 
-                 <div title='System listens live and background syncs every 15m automatically' className='flex items-center space-x-1.5 ml-2 text-[10px] font-bold uppercase text-emerald-400 border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 rounded cursor-help'><span className='relative flex h-2 w-2'><span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75'></span><span className='relative inline-flex rounded-full h-2 w-2 bg-emerald-500'></span></span><span>Live Auto-Sync Active</span></div>
-               </div>
-             </div>
-             <div className="flex space-x-3 mb-3">
-               <input 
-                 type="text" 
-                 value={simMessage}
-                 onChange={e => setSimMessage(e.target.value)}
-                 onKeyDown={e => e.key === 'Enter' && simulateIngestion()}
-                 placeholder="Simulate a customer message from Telegram (e.g. 'My withdrawal is stuck for 3 hours!')"
-                 className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 backdrop-blur-md transition-all"
-               />
-               <button 
-                 onClick={simulateIngestion}
-                 disabled={isSimulating || !simMessage.trim()}
-                 className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-lg px-6 py-2 text-sm font-medium flex items-center transition shadow-lg shadow-indigo-500/20 border border-indigo-400/20"
-               >
-                 {isSimulating ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <><Send className="w-4 h-4 mr-2" /> Classify</>}
-               </button>
-             </div>
-             {backfillStatus && (
-               <div className={`p-3 mt-4 rounded-lg text-sm flex items-center ${backfillStatus.isError ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}`}>
-                 {backfillStatus.isError ? <AlertTriangle className="w-4 h-4 mr-2 flex-shrink-0" /> : <RefreshCcw className="w-4 h-4 mr-2 flex-shrink-0" />}
-                 {backfillStatus.message}
-               </div>
-             )}
+          {/* Simulator / Actions */}
+          <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-5 mb-6">
+            <div className="flex justify-between items-center mb-2">
+              <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Test Integration (Simulation)</h2>
+              <div className="flex items-center space-x-2">
+                <select value={backfillDays} onChange={e => setBackfillDays(Number(e.target.value))}
+                  className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
+                  disabled={isBackfilling}
+                >
+                  <option value={1}>Last 24 Hours</option>
+                  <option value={3}>Last 3 Days</option>
+                  <option value={7}>Last 7 Days</option>
+                  <option value={14}>Last 14 Days</option>
+                  <option value={30}>Last 30 Days</option>
+                </select>
+                <select value={backfillLimit} onChange={e => setBackfillLimit(Number(e.target.value))}
+                  className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
+                  disabled={isBackfilling}
+                >
+                  <option value={20}>Max 20</option>
+                  <option value={50}>Max 50</option>
+                  <option value={100}>Max 100</option>
+                  <option value={500}>Max 500</option>
+                </select>
+                <button onClick={handleBackfill} disabled={isBackfilling}
+                  className="px-3 py-1 bg-white/10 hover:bg-white/20 transition rounded text-[10px] font-bold uppercase disabled:opacity-50 flex items-center"
+                >
+                  {isBackfilling ? <RefreshCcw className="w-3 h-3 animate-spin mr-1" /> : <Clock className="w-3 h-3 mr-1" />}
+                  Sync History Data
+                </button>
+                <div title="System listens live and background syncs every 15m automatically"
+                  className="flex items-center space-x-1.5 ml-2 text-[10px] font-bold uppercase text-emerald-400 border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 rounded cursor-help"
+                >
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                  </span>
+                  <span>Live Auto-Sync Active</span>
+                </div>
+              </div>
+            </div>
+            <div className="flex space-x-3 mb-3">
+              <input
+                type="text"
+                value={simMessage}
+                onChange={e => setSimMessage(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && simulateIngestion()}
+                placeholder="Simulate a customer message (e.g. 'My withdrawal is stuck for 3 hours!')"
+                className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 backdrop-blur-md transition-all"
+              />
+              <button onClick={simulateIngestion} disabled={isSimulating || !simMessage.trim()}
+                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-lg px-6 py-2 text-sm font-medium flex items-center transition shadow-lg shadow-indigo-500/20 border border-indigo-400/20"
+              >
+                {isSimulating ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <><Send className="w-4 h-4 mr-2" />Classify</>}
+              </button>
+            </div>
+            {backfillStatus && (
+              <div className={`p-3 mt-4 rounded-lg text-sm flex items-center ${backfillStatus.isError ? "bg-red-500/10 text-red-400 border border-red-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"}`}>
+                {backfillStatus.isError ? <AlertTriangle className="w-4 h-4 mr-2 flex-shrink-0" /> : <RefreshCcw className={`w-4 h-4 mr-2 flex-shrink-0 ${isBackfilling ? "animate-spin" : ""}`} />}
+                {backfillStatus.message}
+              </div>
+            )}
+            {/* Live backfill progress bar â€” show as soon as backfill is running */}
+            {backfillProgress && (
+              <div className="mt-3 space-y-1">
+                <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-white/50">
+                  <span className={backfillProgress.running ? "text-indigo-400" : "text-emerald-400"}>
+                    {backfillProgress.running ? `â³ Processing... (${backfillProgress.done}/${backfillProgress.total})` : `âœ… Complete`}
+                  </span>
+                  <span>
+                    {backfillProgress.ingested} classified &nbsp;Â·&nbsp; {backfillProgress.skipped} skipped out of {backfillProgress.total}
+                  </span>
+                </div>
+                <div className="w-full bg-white/10 rounded-full h-2.5 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-700 ${backfillProgress.running ? "bg-indigo-500" : "bg-emerald-500"}`}
+                    style={{ width: backfillProgress.total > 0 ? `${Math.round((backfillProgress.done / backfillProgress.total) * 100)}%` : "5%" }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Feature 7: Urgency Filter Pills â€” Low is opt-in (hidden by default in Issues Only mode) */}
+          <div className="flex items-center gap-2 flex-wrap mb-2">
+            {(["All", "Critical", "High", "Medium", "Low"] as const).map(level => (
+              <button
+                key={level}
+                id={`urgency-filter-${level.toLowerCase()}`}
+                onClick={() => setUrgencyFilter(level)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+                  urgencyFilter === level
+                    ? level === "Critical" ? "bg-red-600 text-white"
+                    : level === "High"     ? "bg-orange-500 text-white"
+                    : level === "Medium"   ? "bg-yellow-500 text-black"
+                    : level === "Low"      ? "bg-blue-500 text-white"
+                    : "bg-white text-black"
+                    : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                }`}
+              >
+                {level === "Critical" ? <span className="inline-block w-2 h-2 rounded-full mr-1.5 bg-red-500" /> : level === "High" ? <span className="inline-block w-2 h-2 rounded-full mr-1.5 bg-orange-500" /> : level === "Medium" ? <span className="inline-block w-2 h-2 rounded-full mr-1.5 bg-yellow-500" /> : level === "Low" ? <span className="inline-block w-2 h-2 rounded-full mr-1.5 bg-blue-500" /> : null}
+                {level}
+              </button>
+            ))}
+          </div>
+
 
           {/* Filters Row */}
           <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-4 flex flex-wrap gap-4 items-center mb-6">
             <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest mr-2">Filters</h2>
-            
             <div className="flex-1 min-w-[200px]">
-              <input 
-                type="text" 
-                placeholder="Search tickets..." 
+              <input type="text" placeholder="Search tickets..."
                 className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-indigo-500/50 transition-colors placeholder:text-white/30"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               />
             </div>
-
             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10 items-center">
               <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterDays} onChange={e => setFilterDays(e.target.value)}>
                 <option value="All">All Time</option>
@@ -533,22 +742,21 @@ export default function App() {
               {filterDays === "Custom" && (
                 <div className="flex items-center space-x-2 ml-2 px-2 border-l border-white/10">
                   <input type="date" className="bg-transparent text-sm text-white/80 outline-none appearance-none cursor-pointer [color-scheme:dark]" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} />
-                  <span className="text-white/40text-xs">to</span>
+                  <span className="text-white/40 text-xs">to</span>
                   <input type="date" className="bg-transparent text-sm text-white/80 outline-none appearance-none cursor-pointer [color-scheme:dark]" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} />
                 </div>
               )}
             </div>
-
             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
               <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
                 <option value="All">All Statuses</option>
+                <option value="Classifying">Classifying</option>
                 <option value="Open">Open</option>
                 <option value="In Review">In Review</option>
                 <option value="Resolved">Resolved</option>
                 <option value="Dismissed">Dismissed</option>
               </select>
             </div>
-
             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
               <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterUrgency} onChange={e => setFilterUrgency(e.target.value)}>
                 <option value="All">All Urgency</option>
@@ -558,7 +766,6 @@ export default function App() {
                 <option value="Low">Low</option>
               </select>
             </div>
-            
             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
               <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
                 <option value="All">All Categories</option>
@@ -567,10 +774,13 @@ export default function App() {
                 ))}
               </select>
             </div>
-            
-            {(filterDays !== "All" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All" || filterStartDate || filterEndDate || searchQuery) && (
-              <button 
-                onClick={() => { setFilterDays("All"); setFilterStatus("All"); setFilterUrgency("All"); setFilterCategory("All"); setFilterStartDate(""); setFilterEndDate(""); setSearchQuery(""); }}
+            {(filterDays !== "All" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All" || filterStartDate || filterEndDate || searchQuery || urgencyFilter !== "All") && (
+              <button
+                onClick={() => {
+                  setFilterDays("All"); setFilterStatus("All"); setFilterUrgency("All");
+                  setFilterCategory("All"); setFilterStartDate(""); setFilterEndDate("");
+                  setSearchQuery(""); setUrgencyFilter("All");
+                }}
                 className="text-xs text-indigo-400 hover:text-indigo-300 ml-auto transition"
               >
                 Clear Filters
@@ -580,326 +790,547 @@ export default function App() {
 
           {/* Stats Row */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl">
-              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Tickets Today</p>
-              <div className="text-4xl font-bold">{ticketsToday.length}</div>
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold">{urgencyFilter !== "All" ? `${urgencyFilter} Active Issues` : "Active Issues"}</p>
+                <AlertTriangle className={`w-5 h-5 ${activeCount > 0 ? "text-rose-500" : "text-rose-500/40"}`} />
+              </div>
+              <div className="flex items-end justify-between w-full">
+                <span className={`text-4xl font-bold ${activeCount > 0 ? "text-rose-500" : "text-rose-500/80"}`}>{activeCount}</span>
+              </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl">
-              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Open Tickets</p>
-              <div className="text-4xl font-bold text-indigo-400">{openCount}</div>
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold">In Review</p>
+              </div>
+              <div className="flex items-end justify-between w-full">
+                <span className={`text-4xl font-bold ${escalatedCount > 0 ? "text-amber-500" : "text-amber-500/80"}`}>{escalatedCount}</span>
+              </div>
+            </div>
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold">Resolved Today</p>
+              </div>
+              <div className="flex items-end justify-between w-full">
+                <span className={`text-4xl font-bold ${resolvedTodayCount > 0 ? "text-emerald-500" : "text-emerald-500/80"}`}>{resolvedTodayCount}</span>
+              </div>
             </div>
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Resolution Rate</p>
               <div className="flex items-end justify-between w-full">
                 <span className="text-4xl font-bold">{resolutionRate}%</span>
                 <div className="w-24 h-2 bg-white/10 rounded-full mb-2">
-                  <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${resolutionRate}%` }}></div>
+                  <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${resolutionRate}%` }} />
                 </div>
-              </div>
-            </div>
-            <div className="bg-rose-500/10 border border-rose-500/20 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold">{urgencyCardLabel}</p>
-                <AlertTriangle className={`w-5 h-5 ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/40'}`} />
-              </div>
-              <div className="flex items-end justify-between w-full">
-                 <span className={`text-4xl font-bold ${urgencyCount > 0 ? 'text-rose-500' : 'text-rose-500/80'}`}>{urgencyCount}</span>
-                 {urgencyCount > 0 && <span className="bg-rose-500 text-white text-xs px-2 py-1 rounded uppercase font-bold mb-1">Urgent</span>}
               </div>
             </div>
           </div>
 
-          {/* Charts Area */}
-          <div className="flex flex-col gap-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col md:col-span-2 min-h-[250px]">
-                <div className="flex justify-between items-center mb-6">
-                  <h3 className="text-base font-semibold text-white/90">Issue Volume ({filterDays === "All" ? "30 Days (Max)" : filterDays === "Custom" ? "Custom Range" : `${filterDays} Days`})</h3>
+          {/* Charts */}
+          <ErrorBoundary>
+            <div className="flex flex-col gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col md:col-span-2 min-h-[250px]">
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-base font-semibold text-white/90">Issue Volume ({filterDays === "All" ? "30 Days (Max)" : filterDays === "Custom" ? "Custom Range" : `${filterDays} Days`})</h3>
+                  </div>
+                  <div className="flex-1 w-full relative h-[200px]">
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                      <LineChart data={volumeData}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: "rgba(255,255,255,0.4)", fontSize: 11, fontWeight: "bold" }} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fill: "rgba(255,255,255,0.4)", fontSize: 11 }} />
+                        <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff" }} itemStyle={{ color: "#fff" }} />
+                        <Line type="monotone" dataKey="tickets" stroke="#6366f1" strokeWidth={3} dot={{ r: 4, strokeWidth: 2, fill: "#05070a", stroke: "#6366f1" }} activeDot={{ r: 6, fill: "#6366f1", stroke: "#fff" }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
-                <div className="flex-1 w-full relative h-[200px]">
-                  <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                    <LineChart data={volumeData}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                      <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase'}} />
-                      <YAxis axisLine={false} tickLine={false} tick={{fill: 'rgba(255,255,255,0.4)', fontSize: 11}} />
-                      <Tooltip contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff' }} itemStyle={{ color: '#fff' }} />
-                      <Line type="monotone" dataKey="tickets" stroke="#6366f1" strokeWidth={3} dot={{r: 4, strokeWidth: 2, fill: '#05070a', stroke: '#6366f1'}} activeDot={{r: 6, fill: '#6366f1', stroke: '#fff'}} />
-                    </LineChart>
-                  </ResponsiveContainer>
+                <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col min-h-[250px]">
+                  <h3 className="text-base font-semibold text-white/90 mb-4">Resolution Comparison</h3>
+                  <div className="flex-1 flex flex-col items-center justify-center">
+                    {filteredTickets.length === 0 ? (
+                      <div className="text-white/40 text-sm">No data yet</div>
+                    ) : (
+                      <div className="flex flex-col w-full h-full items-center">
+                        <div className="w-full h-[140px] mb-4">
+                          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                            <PieChart>
+                              <Pie data={resolutionData} cx="50%" cy="50%" innerRadius={0} outerRadius={65} dataKey="value" stroke="rgba(0,0,0,0)">
+                                <Cell fill="#10b981" />
+                                <Cell fill="#6366f1" />
+                              </Pie>
+                              <Tooltip formatter={(value: number) => [`${value} tickets`, "Count"]} contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff", fontSize: "12px" }} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <div className="w-full flex justify-center space-x-6">
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2" /><span className="text-sm text-white/80 mr-2">Resolved</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[0].value}</span></div>
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Open</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1].value}</span></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col min-h-[250px]">
-                <h3 className="text-base font-semibold text-white/90 mb-4">Resolution Comparison</h3>
+              <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col">
+                <h3 className="text-base font-semibold text-white/90 mb-4">Category Breakdown</h3>
                 <div className="flex-1 flex flex-col items-center justify-center">
                   {filteredTickets.length === 0 ? (
                     <div className="text-white/40 text-sm">No data yet</div>
                   ) : (
-                    <div className="flex flex-col w-full h-full items-center">
-                      <div className="w-full h-[140px] mb-4">
+                    <div className="flex flex-col md:flex-row w-full h-full items-center">
+                      <div className="w-full md:w-1/3 h-[180px] mb-4 md:mb-0">
                         <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                           <PieChart>
-                            <Pie
-                              data={resolutionData}
-                              cx="50%"
-                              cy="50%"
-                              innerRadius={0}
-                              outerRadius={65}
-                              dataKey="value"
-                              stroke="rgba(0,0,0,0)"
-                            >
-                              <Cell fill="#10b981" />
-                              <Cell fill="#6366f1" />
+                            <Pie data={categoryData} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={2} dataKey="value" stroke="rgba(0,0,0,0)">
+                              {categoryData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} onClick={() => handleCategoryClick(entry.name)} className="cursor-pointer hover:opacity-80 transition-opacity" />)}
                             </Pie>
-                            <Tooltip formatter={(value: number) => [`${value} tickets`, 'Count']} contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff', fontSize: '12px' }} />
+                            <Tooltip formatter={(value: number) => [`${value} tickets`, "Count"]} contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff", fontSize: "12px" }} />
                           </PieChart>
                         </ResponsiveContainer>
                       </div>
-                      <div className="w-full flex justify-center space-x-6">
-                         <div className="flex items-center">
-                            <span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2"></span>
-                            <span className="text-sm text-white/80 mr-2">Resolved</span>
-                            <span className="text-sm font-bold text-white shrink-0">{resolutionData[0].value}</span>
-                         </div>
-                         <div className="flex items-center">
-                            <span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2"></span>
-                            <span className="text-sm text-white/80 mr-2">Open</span>
-                            <span className="text-sm font-bold text-white shrink-0">{resolutionData[1].value}</span>
-                         </div>
+                      <div className="w-full md:w-2/3 grid grid-cols-2 md:grid-cols-3 gap-y-3 gap-x-6 pl-4">
+                        {categoryData.sort((a, b) => (Number(b.value) - Number(a.value))).map((entry, index) => (
+                          <div key={entry.name} onClick={() => handleCategoryClick(entry.name)} className="flex items-center justify-between bg-white/5 px-3 py-2 rounded-lg border border-white/5 cursor-pointer hover:bg-white/10 transition-colors">
+                            <div className="flex items-center space-x-2 truncate min-w-0">
+                              <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                              <span className="text-sm text-white/80 truncate" title={entry.name}>{entry.name}</span>
+                            </div>
+                            <span className="text-sm font-bold text-white shrink-0 ml-2">{entry.value}</span>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}
                 </div>
               </div>
             </div>
+          </ErrorBoundary>
 
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col">
-              <h3 className="text-base font-semibold text-white/90 mb-4">Category Breakdown</h3>
-              <div className="flex-1 flex flex-col items-center justify-center">
-                {filteredTickets.length === 0 ? (
-                  <div className="text-white/40 text-sm">No data yet</div>
-                ) : (
-                  <div className="flex flex-col md:flex-row w-full h-full items-center">
-                    <div className="w-full md:w-1/3 h-[180px] mb-4 md:mb-0">
-                      <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                        <PieChart>
-                          <Pie
-                            data={categoryData}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={55}
-                            outerRadius={80}
-                            paddingAngle={2}
-                            dataKey="value"
-                            stroke="rgba(0,0,0,0)"
+          {/* Ticket Feed */}
+          <div id="ticket-feed" className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl flex flex-col min-h-0 overflow-hidden">
+            <div className="px-5 py-4 border-b border-white/5 flex justify-between items-center bg-transparent">
+              <h3 className="text-sm font-semibold text-white/80">Real-time Stream</h3>
+              <div className="flex items-center gap-2">
+                {/* Issues-Only toggle */}
+                <button
+                  id="toggle-issues-only"
+                  onClick={() => { setShowIssuesOnly(v => !v); setCurrentPage(1); }}
+                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg border uppercase tracking-widest transition-all flex items-center gap-1.5 ${
+                    showIssuesOnly
+                      ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/40 hover:bg-indigo-500/30"
+                      : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20"
+                  }`}
+                  title={showIssuesOnly ? "Showing issues only â€” click to show ALL messages including general chat" : "Showing ALL messages â€” click to show issues only"}
+                >
+                  {showIssuesOnly ? (
+                    <><span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block" />Issues Only<span className="opacity-50 font-normal normal-case">({totalTickets})</span></>
+                  ) : (
+                    <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />All Messages<span className="opacity-50 font-normal normal-case">({totalTickets})</span></>
+                  )}
+                </button>
+                <span className="text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded flex items-center uppercase tracking-widest">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-2 pulse-animation shadow-[0_0_8px_rgba(52,211,153,0.8)]" /> Listening
+                </span>
+              </div>
+            </div>
+
+            <ErrorBoundary>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="border-b border-white/5 text-[10px] text-white/30 uppercase tracking-widest">
+                      <th className="font-medium px-5 py-3">Status</th>
+                      <th className="font-medium px-5 py-3">Urgency</th>
+                      <th className="font-medium px-5 py-3">Summary</th>
+                      <th className="font-medium px-5 py-3">Category</th>
+                      <th className="font-medium px-5 py-3 text-right">Time</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm">
+                    {paginatedTickets.length === 0 ? (
+                      <tr><td colSpan={5} className="px-5 py-8 text-center text-white/40">No tickets found.</td></tr>
+                    ) : (
+                      paginatedTickets.map(ticket => (
+                        <React.Fragment key={ticket.id}>
+                          <tr
+                            className={`border-b border-white/5 hover:bg-white/5 cursor-pointer transition ${ticket.urgency === "Critical" ? "bg-rose-500/5" : ""}`}
+                            onClick={() => setExpandedTicketId(expandedTicketId === ticket.id ? null : ticket.id)}
                           >
-                            {categoryData.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip formatter={(value: number) => [`${value} tickets`, 'Count']} contentStyle={{ borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', backgroundColor: 'rgba(5, 7, 10, 0.8)', backdropFilter: 'blur(12px)', color: '#fff', fontSize: '12px' }} />
-                        </PieChart>
-                      </ResponsiveContainer>
+                            <td className="px-5 py-4">
+                              {ticket.status === "Classifying" ? (
+                                <span className="text-[10px] uppercase font-bold tracking-widest rounded px-2 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 inline-flex items-center">
+                                  <RefreshCcw className="w-3 h-3 mr-1 animate-spin" /> Classifying
+                                </span>
+                              ) : (
+                                <select
+                                  className={`text-[10px] uppercase font-bold tracking-widest rounded px-2 py-1 outline-none border border-white/10 appearance-none [&>option]:text-black ${
+                                    ticket.status === "Open"       ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" :
+                                    ticket.status === "Resolved"   ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                                    ticket.status === "Dismissed"  ? "bg-white/5 text-white/40 border-white/10" :
+                                    "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                  }`}
+                                  value={ticket.status}
+                                  onClick={e => e.stopPropagation()}
+                                  onChange={e => handleUpdateStatus(ticket.id, e.target.value)}
+                                >
+                                  <option value="Open">Open</option>
+                                  <option value="In Review">In Review</option>
+                                  <option value="Resolved">Resolved</option>
+                                  <option value="Dismissed">Dismissed</option>
+                                </select>
+                              )}
+                            </td>
+                            <td className="px-5 py-4">
+                              <span className={`text-[10px] px-2 py-0.5 rounded text-white font-bold uppercase ${URGENCY_COLORS[ticket.urgency] || "bg-white/20"}`}>{ticket.urgency}</span>
+                            </td>
+                            <td className="px-5 py-4 font-medium text-white/90">
+                              <div className="flex items-center gap-2">
+                                <span>{ticket.summary}</span>
+                                {(() => {
+                                  let link = ticket.telegram_deep_link;
+                                  if (!link && ticket.group_id && ticket.telegram_message_id && ticket.telegram_message_id !== "null") {
+                                    link = `https://t.me/${ticket.group_id.replace("@", "")}/${ticket.telegram_message_id}`;
+                                  }
+                                  return link ? (
+                                    <a
+                                      href={link}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={e => e.stopPropagation()}
+                                      title="View original message in Telegram"
+                                      style={{ color: "#2AABEE" }}
+                                      className="flex-shrink-0 hover:opacity-70 transition ml-2"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </a>
+                                  ) : null;
+                                })()}
+                                {expandedTicketId === ticket.id ? <ChevronUp className="w-4 h-4 ml-1 text-white/40" /> : <ChevronDown className="w-4 h-4 ml-1 text-white/40" />}
+                              </div>
+                            </td>
+                            <td className="px-5 py-4 text-white/60">{ticket.category}</td>
+                            <td className="px-5 py-4 text-right text-white/40 whitespace-nowrap font-mono text-[10px]">{formatTicketDate(ticket.created_at)}</td>
+                          </tr>
+
+                          {/* Expanded Details */}
+                          {expandedTicketId === ticket.id && (
+                            <tr className="bg-black/20 border-b border-white/5">
+                              <td colSpan={5} className="px-5 py-5">
+                                <ErrorBoundary>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    {/* Left col: original message */}
+                                    <div>
+                                      {(() => {
+                                        const raw = ticket.raw_text || "";
+                                        
+                                        // The original message ends when the first tag starts
+                                        const firstTagIndex = raw.search(/\[(ADMIN_REPLY|USER_REPLY)/);
+                                        const originalMsg = firstTagIndex !== -1 ? raw.substring(0, firstTagIndex).trim() : raw.trim();
+                                        
+                                        // Extract thread replies
+                                        const replies = [];
+                                        const matches = [...raw.matchAll(/\[(ADMIN_REPLY|USER_REPLY(?: [^\]]+)?)\]([\s\S]*?)\[\/(?:ADMIN_REPLY|USER_REPLY)\]/g)];
+                                        matches.forEach(m => {
+                                          const tag = m[1];
+                                          const content = m[2].trim();
+                                          if (tag.startsWith("USER_REPLY")) {
+                                            const labelMatch = tag.match(/USER_REPLY \((.*?)\)/);
+                                            replies.push({ type: 'user', content, label: labelMatch ? labelMatch[1] : 'User Reply' });
+                                          } else {
+                                            replies.push({ type: 'admin', content, label: 'Admin Reply' });
+                                          }
+                                        });
+
+                                        return (
+                                          <div className="space-y-4">
+                                            <div>
+                                              <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2 flex items-center justify-between">
+                                                <span>Customer's Original Message</span>
+                                              </div>
+                                              <div className="bg-white/5 p-4 rounded-xl text-sm text-white/80 leading-relaxed whitespace-pre-wrap border border-white/5 font-mono">
+                                                {originalMsg}
+                                              </div>
+                                              
+                                              {(() => {
+                                                let link = ticket.telegram_deep_link;
+                                                if (!link && ticket.group_id && ticket.telegram_message_id && ticket.telegram_message_id !== "null") {
+                                                  link = `https://t.me/${ticket.group_id.replace("@", "")}/${ticket.telegram_message_id}`;
+                                                }
+                                                return link ? (
+                                                <a
+                                                  href={link}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  style={{ color: "#2AABEE" }}
+                                                  className="mt-3 inline-flex items-center gap-1.5 text-xs hover:opacity-80 transition font-medium"
+                                                >
+                                                  <ExternalLink className="w-3 h-3" />
+                                                  View Original Message in Telegram
+                                                </a>
+                                              ) : null;
+                                              })()}
+                                            </div>
+
+                                            {replies.length > 0 && (
+                                              <div>
+                                                <div className="text-[10px] font-bold text-white/50 uppercase tracking-widest mb-2 flex items-center">
+                                                  <CheckCircle className="w-3 h-3 mr-1" /> Conversation Thread
+                                                </div>
+                                                <div className="space-y-4 pt-2">
+                                                  {replies.map((reply, idx) => (
+                                                    <div key={idx} className={`flex w-full ${reply.type === 'admin' ? 'justify-end' : 'justify-start'}`}>
+                                                      <div className={`max-w-[85%] p-3 rounded-2xl border text-sm whitespace-pre-wrap ${reply.type === 'admin' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-100 rounded-tr-sm' : 'bg-blue-500/10 border-blue-500/20 text-blue-100 rounded-tl-sm'}`}>
+                                                        <div className={`text-[10px] font-bold uppercase tracking-widest mb-1 opacity-80 ${reply.type === 'admin' ? 'text-emerald-400' : 'text-blue-400'}`}>
+                                                          {reply.label}
+                                                        </div>
+                                                        {reply.content}
+                                                      </div>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })()}
+                                    </div>
+
+                                    {/* Right col: actions */}
+                                    <div className="space-y-4">
+                                      <div>
+                                        <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">AI Suggested Action</div>
+                                        <div className="text-sm font-medium text-indigo-300 bg-indigo-500/10 py-2.5 px-4 rounded-xl inline-block border border-indigo-500/20">
+                                          {ticket.suggested_action}
+                                        </div>
+                                      </div>
+                                      <div className="grid grid-cols-2 gap-4">
+                                        <div className="bg-white/5 border border-white/10 rounded-xl p-3">
+                                          <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">Product Area</div>
+                                          <div className="text-sm text-white/90 font-medium">{ticket.product_area}</div>
+                                        </div>
+                                        <div className="bg-white/5 border border-white/10 rounded-xl p-3">
+                                          <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">Customer Sentiment</div>
+                                          <div className="text-sm text-white/90 font-medium">{ticket.sentiment}</div>
+                                        </div>
+
+                                        {/* Gemini suggested reply â€” only show when the AI generated one */}
+                                        {ticket.suggested_reply && (
+                                          <div className="col-span-2 mt-2">
+                                            <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">
+                                              AI Suggested Reply
+                                            </div>
+                                            <div className="relative group">
+                                              <textarea
+                                                className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-sm text-white/90 leading-relaxed outline-none focus:border-indigo-500/50 resize-none min-h-[100px]"
+                                                defaultValue={ticket.suggested_reply}
+                                              />
+                                              <button
+                                                className="absolute top-3 right-3 bg-indigo-500 hover:bg-indigo-600 text-white text-[10px] px-3 py-1.5 rounded uppercase font-bold tracking-widest opacity-0 group-hover:opacity-100 transition-opacity"
+                                                onClick={e => {
+                                                  const ta = e.currentTarget.previousSibling as HTMLTextAreaElement;
+                                                  navigator.clipboard.writeText(ta.value);
+                                                  showNotification("Reply copied to clipboard!", "success");
+                                                }}
+                                              >
+                                                Copy
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {/* Action buttons */}
+                                        <div className="col-span-2 mt-2 space-y-2">
+                                          <a
+                                            href={encodeURI(`mailto:support@quidax.com?subject=Escalated [${ticket.urgency}] Support Ticket: ${ticket.category}`)}
+                                            target="_blank" rel="noopener noreferrer"
+                                            className="w-full flex items-center justify-center py-2.5 px-4 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white font-medium text-sm transition"
+                                          >
+                                            <Send className="w-4 h-4 mr-2" /> Email Support
+                                          </a>
+
+                                          <div className="flex space-x-2">
+                                            <button
+                                              onClick={() => handleUpdateStatus(ticket.id, "Resolved")}
+                                              className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium text-sm transition border border-emerald-500/20"
+                                            >
+                                              <CheckCircle className="w-4 h-4 mr-2" /> Mark Resolved
+                                            </button>
+
+                                            {/* Feature 4: Jira button â€” only on Critical/High without existing Jira key */}
+                                            {(ticket.urgency === "Critical" || ticket.urgency === "High") && !ticket.jira_issue_key && (
+                                              <button
+                                                id={`jira-btn-${ticket.id}`}
+                                                onClick={() => handleCreateJiraTicket(ticket.id)}
+                                                disabled={jiraLoading[ticket.id]}
+                                                className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 font-medium text-sm transition border border-blue-500/20 disabled:opacity-50"
+                                              >
+                                                {jiraLoading[ticket.id] ? <RefreshCcw className="w-4 h-4 animate-spin mr-2" /> : <ExternalLink className="w-4 h-4 mr-2" />}
+                                                Create Jira Ticket
+                                              </button>
+                                            )}
+
+                                            {ticket.jira_issue_key && ticket.jira_issue_url && (
+                                              <a
+                                                href={ticket.jira_issue_url}
+                                                target="_blank" rel="noopener noreferrer"
+                                                className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-blue-500/10 text-blue-400 font-medium text-sm border border-blue-500/20"
+                                              >
+                                                <ExternalLink className="w-4 h-4 mr-2" /> {ticket.jira_issue_key}
+                                              </a>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </ErrorBoundary>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 pb-6">
+                    <div className="text-[10px] uppercase font-bold text-white/40 tracking-widest">
+                      Showing {(currentPage - 1) * itemsPerPage + 1}â€“{Math.min(currentPage * itemsPerPage, totalTickets)} of {totalTickets} messages
                     </div>
-                    <div className="w-full md:w-2/3 grid grid-cols-2 md:grid-cols-3 gap-y-3 gap-x-6 pl-4">
-                       {categoryData.sort((a: any, b: any) => b.value - a.value).map((entry, index) => (
-                          <div key={entry.name} className="flex items-center justify-between bg-white/5 px-3 py-2 rounded-lg border border-white/5">
-                             <div className="flex items-center space-x-2 truncate min-w-0">
-                               <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }}></span>
-                               <span className="text-sm text-white/80 truncate" title={entry.name}>{entry.name}</span>
-                             </div>
-                             <span className="text-sm font-bold text-white shrink-0 ml-2">{entry.value}</span>
-                          </div>
-                       ))}
+                    <div className="flex items-center space-x-4">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-[10px] uppercase font-bold text-white/40 tracking-widest">Rows per page:</span>
+                        <select
+                          className="bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-white outline-none [&>option]:text-black"
+                          value={itemsPerPage}
+                          onChange={e => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                        >
+                          <option value={10}>10</option>
+                          <option value={20}>20</option>
+                          <option value={30}>30</option>
+                          <option value={50}>50</option>
+                        </select>
+                      </div>
+                      <div className="flex space-x-2">
+                        <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}
+                          className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium">Prev</button>
+                        <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages}
+                          className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium">Next</button>
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
-            </div>
-          </div>
-
-          {/* Ticket Feed */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl flex flex-col min-h-0 overflow-hidden">
-            <div className="px-5 py-4 border-b border-white/5 flex justify-between items-center bg-transparent">
-               <h3 className="text-sm font-semibold text-white/80">Real-time Stream</h3>
-               <span className="text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded flex items-center uppercase tracking-widest">
-                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-2 pulse-animation shadow-[0_0_8px_rgba(52,211,153,0.8)]"></span> Listening
-               </span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead>
-                  <tr className="border-b border-white/5 text-[10px] text-white/30 uppercase tracking-widest">
-                    <th className="font-medium px-5 py-3">Status</th>
-                    <th className="font-medium px-5 py-3">Urgency</th>
-                    <th className="font-medium px-5 py-3">Summary</th>
-                    <th className="font-medium px-5 py-3">Category</th>
-                    <th className="font-medium px-5 py-3 text-right">Time</th>
-                  </tr>
-                </thead>
-                <tbody className="text-sm">
-                  {paginatedTickets.length === 0 ? (
-                    <tr><td colSpan={5} className="px-5 py-8 text-center text-white/40">No tickets found on this page.</td></tr>
-                  ) : (
-                    paginatedTickets.map(ticket => (
-                      <React.Fragment key={ticket.id}>
-                        <tr 
-                          className={`border-b border-white/5 hover:bg-white/5 cursor-pointer transition ${ticket.urgency === 'Critical' ? 'bg-rose-500/5' : ''}`}
-                          onClick={() => setExpandedTicketId(expandedTicketId === ticket.id ? null : ticket.id)}
-                        >
-                          <td className="px-5 py-4">
-                            <select 
-                              className={`text-[10px] uppercase font-bold tracking-widest rounded px-2 py-1 outline-none border border-white/10 appearance-none [&>option]:text-black ${
-                                ticket.status === 'Open' ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' :
-                                ticket.status === 'Resolved' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
-                                ticket.status === 'Dismissed' ? 'bg-white/5 text-white/40 border-white/10' :
-                                'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                              }`}
-                              value={ticket.status}
-                              onClick={e => e.stopPropagation()}
-                              onChange={e => updateTicketStatus(ticket.id, e.target.value)}
-                            >
-                              <option value="Open">Open</option>
-                              <option value="In Review">In Review</option>
-                              <option value="Resolved">Resolved</option>
-                              <option value="Dismissed">Dismissed</option>
-                            </select>
-                          </td>
-                          <td className="px-5 py-4">
-                             <div className="flex items-center">
-                               <span className={`text-[10px] px-2 py-0.5 rounded text-white font-bold uppercase ${URGENCY_COLORS[ticket.urgency] || 'bg-white/20'}`}>{ticket.urgency}</span>
-                             </div>
-                          </td>
-                          <td className="px-5 py-4 font-medium text-white/90 flex items-center">
-                            {ticket.summary}
-                            {expandedTicketId === ticket.id ? <ChevronUp className="w-4 h-4 ml-2 text-white/40" /> : <ChevronDown className="w-4 h-4 ml-2 text-white/40" />}
-                          </td>
-                          <td className="px-5 py-4 text-white/60">{ticket.category}</td>
-                          <td className="px-5 py-4 text-right text-white/40 whitespace-nowrap font-mono text-[10px]">
-                            {formatTicketDate(ticket.created_at)}
-                          </td>
-                        </tr>
-                        {/* Expanded details */}
-                        {expandedTicketId === ticket.id && (
-                          <tr className="bg-black/20 border-b border-white/5">
-                            <td colSpan={5} className="px-5 py-5">
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div>
-                                  <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Customer's Original Message</div>
-                                  <div className="bg-white/5 p-4 rounded-xl border border-white/10 text-white/80 text-sm whitespace-pre-wrap leading-relaxed">
-                                    "{ticket.raw_text.split('[ADMIN_REPLY]')[0].trim()}"
-                                  </div>
-                                  
-                                  {ticket.raw_text.includes('[ADMIN_REPLY]') && (
-                                    <div className="mt-4">
-                                      <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-2 flex items-center">
-                                        <CheckCircle className="w-3 h-3 mr-1" /> Admin / Team Responses
-                                      </div>
-                                      <div className="space-y-2">
-                                        {ticket.raw_text.split('[ADMIN_REPLY]').slice(1).map((replyBlock, idx) => (
-                                          <div key={idx} className="bg-emerald-500/10 p-3 rounded-xl border border-emerald-500/20 text-emerald-100 text-sm whitespace-pre-wrap">
-                                            {replyBlock.replace('[/ADMIN_REPLY]', '').trim()}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                                <div className="space-y-4">
-                                  <div>
-                                    <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">AI Suggested Action</div>
-                                    <div className="text-sm font-medium text-indigo-300 bg-indigo-500/10 py-2.5 px-4 rounded-xl inline-block border border-indigo-500/20">
-                                      {ticket.suggested_action}
-                                    </div>
-                                  </div>
-                                  <div className="grid grid-cols-2 gap-4">
-                                    <div className="bg-white/5 border border-white/10 rounded-xl p-3">
-                                      <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">Product Area</div>
-                                      <div className="text-sm text-white/90 font-medium">{ticket.product_area}</div>
-                                    </div>
-                                    <div className="bg-white/5 border border-white/10 rounded-xl p-3">
-                                      <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">Customer Sentiment</div>
-                                      <div className="text-sm text-white/90 font-medium">{ticket.sentiment}</div>
-                                    </div>
-                                    <div className="col-span-2 mt-2">
-                                       <a
-                                         href={encodeURI(`mailto:support@quidax.com?subject=Escalated [${ticket.urgency}] Support Ticket: ${ticket.category}`)}
-                                         target="_blank"
-                                         rel="noopener noreferrer"
-                                         className="w-full mb-2 flex items-center justify-center py-2.5 px-4 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white font-medium text-sm transition font-bold"
-                                       >
-                                         <Send className="w-4 h-4 mr-2" />
-                                         Email Support
-                                       </a>
-                                       <div className="flex space-x-2">
-                                          <button
-                                            onClick={() => handleUpdateStatus(ticket.id, 'Resolved')}
-                                            className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-medium text-sm transition border border-emerald-500/20"
-                                          >
-                                            <CheckCircle className="w-4 h-4 mr-2" />
-                                            Mark Resolved
-                                          </button>
-                                          <button
-                                            onClick={() => simulateTicketingIntegration(ticket)}
-                                            className="flex-1 flex items-center justify-center py-2 px-4 rounded-lg bg-white/5 hover:bg-white/10 text-white/80 font-medium text-sm transition border border-white/10"
-                                          >
-                                            <Send className="w-4 h-4 mr-2" />
-                                            Auto-Create Zendesk Ticket
-                                          </button>
-                                       </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    ))
-                  )}
-                </tbody>
-              </table>
-              {totalPages > 1 && (
-                <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 bg-transparent pb-6">
-                  <div className="text-[10px] uppercase font-bold text-white/40 tracking-widest">
-                    Showing {(currentPage - 1) * itemsPerPage + 1} to {Math.min(currentPage * itemsPerPage, filteredTickets.length)} of {filteredTickets.length} messages
-                  </div>
-                  <div className="flex items-center space-x-4">
-                    <div className="flex items-center space-x-2">
-                       <span className="text-[10px] uppercase font-bold text-white/40 tracking-widest">Rows per page:</span>
-                       <select 
-                         className="bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-white outline-none [&>option]:text-black"
-                         value={itemsPerPage}
-                         onChange={e => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
-                       >
-                         <option value={10}>10</option>
-                         <option value={20}>20</option>
-                         <option value={30}>30</option>
-                         <option value={50}>50</option>
-                       </select>
-                    </div>
-                    <div className="flex space-x-2">
-                      <button 
-                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
-                        disabled={currentPage === 1} 
-                        className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
-                      >
-                        Prev
-                      </button>
-                      <button 
-                        onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
-                        disabled={currentPage === totalPages} 
-                        className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs disabled:opacity-50 transition font-medium"
-                      >
-                        Next
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
+            </ErrorBoundary>
           </div>
         </main>
+
+        {/* â”€â”€ Benchmark Panel â”€â”€ */}
+        {showBenchmark && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-[#0d1117] border border-white/10 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-white">ðŸŽ¯ AI Classifier Accuracy Benchmark</h2>
+                  <p className="text-xs text-white/40 mt-0.5">20 gold-standard labelled messages â€” measures category &amp; urgency accuracy</p>
+                </div>
+                <button onClick={() => setShowBenchmark(false)} className="text-white/40 hover:text-white transition p-1 rounded-lg hover:bg-white/10">âœ•</button>
+              </div>
+
+              <div className="overflow-y-auto flex-1 p-6">
+                {evalLoading && (
+                  <div className="flex flex-col items-center justify-center py-16 gap-4">
+                    <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                    <p className="text-white/50 text-sm">Running 20 test messages through AI classifierâ€¦</p>
+                    <p className="text-white/30 text-xs">This takes ~30 seconds</p>
+                  </div>
+                )}
+
+                {evalResults?.error && (
+                  <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-4 text-rose-400 text-sm">{evalResults.error}</div>
+                )}
+
+                {evalResults && !evalResults.error && (
+                  <>
+                    {/* Score Cards */}
+                    <div className="grid grid-cols-3 gap-4 mb-6">
+                      {[
+                        { label: "Category Accuracy", value: evalResults.categoryAccuracy, color: evalResults.categoryAccuracy >= 80 ? "emerald" : evalResults.categoryAccuracy >= 60 ? "amber" : "rose" },
+                        { label: "Urgency Accuracy",  value: evalResults.urgencyAccuracy,  color: evalResults.urgencyAccuracy  >= 80 ? "emerald" : evalResults.urgencyAccuracy  >= 60 ? "amber" : "rose" },
+                        { label: "Overall (Both)",    value: evalResults.overallAccuracy,   color: evalResults.overallAccuracy   >= 70 ? "emerald" : evalResults.overallAccuracy   >= 50 ? "amber" : "rose" },
+                      ].map(s => (
+                        <div key={s.label} className={`bg-${s.color}-500/10 border border-${s.color}-500/20 rounded-xl p-5 text-center`}>
+                          <div className={`text-4xl font-black text-${s.color}-400`}>{s.value}%</div>
+                          <div className="text-xs text-white/50 mt-2 uppercase tracking-widest font-semibold">{s.label}</div>
+                          <div className={`text-xs mt-1 text-${s.color}-400/70`}>
+                            {s.value >= 80 ? "âœ… Excellent" : s.value >= 60 ? "âš ï¸ Acceptable" : "âŒ Needs tuning"}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Results Table */}
+                    <div className="rounded-xl border border-white/10 overflow-hidden">
+                      <table className="w-full text-left text-xs">
+                        <thead>
+                          <tr className="border-b border-white/10 bg-white/5 text-[10px] text-white/30 uppercase tracking-widest">
+                            <th className="px-4 py-3">Message</th>
+                            <th className="px-4 py-3">Expected</th>
+                            <th className="px-4 py-3">Predicted</th>
+                            <th className="px-4 py-3 text-center">Cat âœ“</th>
+                            <th className="px-4 py-3 text-center">Urg âœ“</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {evalResults.results?.map((r: any, i: number) => (
+                            <tr key={i} className={`border-b border-white/5 ${r.correct ? "bg-emerald-500/3" : "bg-rose-500/3"}`}>
+                              <td className="px-4 py-2.5 text-white/60 max-w-[220px] truncate">{r.text}</td>
+                              <td className="px-4 py-2.5">
+                                <div className="text-white/80 font-medium">{r.expectedCategory}</div>
+                                <div className="text-white/30">{r.expectedUrgency}</div>
+                              </td>
+                              <td className="px-4 py-2.5">
+                                <div className={r.categoryMatch ? "text-emerald-400" : "text-rose-400"}>{r.predictedCategory}</div>
+                                <div className={r.urgencyMatch  ? "text-emerald-400/70" : "text-rose-400/70 text-[10px]"}>{r.predictedUrgency}</div>
+                              </td>
+                              <td className="px-4 py-2.5 text-center">{r.categoryMatch ? "âœ…" : "âŒ"}</td>
+                              <td className="px-4 py-2.5 text-center">{r.urgencyMatch  ? "âœ…" : "âŒ"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+
+                {!evalLoading && !evalResults && (
+                  <div className="flex flex-col items-center justify-center py-16 gap-4 text-white/40">
+                    <p className="text-sm">Click "Run Benchmark" to evaluate the AI classifier against 20 known test cases.</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-white/10 flex justify-between items-center">
+                <p className="text-xs text-white/30">Tests {evalResults?.total || 20} messages Â· Uses same Groq llama-3.3-70b model as production</p>
+                <button
+                  onClick={runBenchmark}
+                  disabled={evalLoading}
+                  className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold px-4 py-2 rounded-lg transition"
+                >
+                  {evalLoading ? "Runningâ€¦" : "ðŸ”„ Run Benchmark"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        </React.Fragment>
       )}
       <style>{`
         .pulse-animation { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
@@ -908,3 +1339,4 @@ export default function App() {
     </div>
   );
 }
+
