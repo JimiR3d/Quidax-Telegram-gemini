@@ -3,9 +3,9 @@ import { format, subDays, startOfDay, isToday, isYesterday, parseISO } from "dat
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock, ExternalLink, X } from "lucide-react";
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 // TYPES
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 type Ticket = {
   id: string;
   summary: string;
@@ -23,6 +23,8 @@ type Ticket = {
   telegram_message_id?: string | null;
   jira_issue_key?: string | null;
   jira_issue_url?: string | null;
+  is_admin_message?: boolean;
+  group_id?: string;
 };
 
 type Community = {
@@ -31,9 +33,9 @@ type Community = {
   display_name: string;
 };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 // CONSTANTS
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 const COLORS = ["#6366f1", "#10b981", "#f59e0b", "#f43f5e", "#8b5cf6", "#ec4899", "#14b8a6", "#64748b"];
 const URGENCY_COLORS: Record<string, string> = {
   Critical: "bg-rose-500",
@@ -42,9 +44,9 @@ const URGENCY_COLORS: Record<string, string> = {
   Low:      "bg-blue-500",
 };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 // T3-A: FIELD-LEVEL DIFF GUARD
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 function haveTicketsChanged(prev: Ticket[], next: Ticket[]): boolean {
   if (prev.length !== next.length) return true;
   for (let i = 0; i < next.length; i++) {
@@ -55,16 +57,20 @@ function haveTicketsChanged(prev: Ticket[], next: Ticket[]): boolean {
       p.status        !== n.status        ||
       p.urgency       !== n.urgency       ||
       p.summary       !== n.summary       ||
+      p.category      !== n.category      ||
+      p.is_admin_message !== n.is_admin_message ||
+      p.group_id      !== n.group_id      ||
       p.suggested_reply !== n.suggested_reply ||
+      p.raw_text      !== n.raw_text      ||
       p.jira_issue_key !== n.jira_issue_key
     ) return true;
   }
   return false;
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 // T3-C: ERROR BOUNDARY
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 type ErrState = { hasError: boolean; error?: Error };
 type ErrProps = { children: React.ReactNode; fallback?: React.ReactNode };
 
@@ -95,11 +101,11 @@ class ErrorBoundary extends React.Component<ErrProps, ErrState> {
   }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 // MAIN APP
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------------------------
 export default function App() {
-  // â”€â”€ Auth State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Auth State -------------------------------------------------------------
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     // New: check sessionStorage pd_token; fallback: old localStorage key
     return !!(sessionStorage.getItem("pd_token") || localStorage.getItem("PULSEDESK_ADMIN_KEY"));
@@ -108,7 +114,19 @@ export default function App() {
   const [authError, setAuthError]         = useState<string>("");
   const [authLoading, setAuthLoading]     = useState<boolean>(false);
 
-  // â”€â”€ Dashboard State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // --- Token helpers --------------------------------------------------------------
+  const getToken = useCallback((): string => {
+    return sessionStorage.getItem("pd_token") || localStorage.getItem("PULSEDESK_ADMIN_KEY") || "";
+  }, []);
+
+  const handleCategoryClick = useCallback((category: string) => {
+    setFilterCategory(category);
+    // Smooth scroll to the ticket feed so user sees the filtered results
+    document.getElementById("ticket-feed")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+
+  // --- Dashboard State ------------------------------------------------------------
   const [tickets, setTickets]               = useState<Ticket[]>([]);
   const [communities, setCommunities]       = useState<Community[]>([]);
   const [selectedCommunity, setSelectedCommunity] = useState<string>("");
@@ -116,7 +134,7 @@ export default function App() {
   const [demoModeBanner, setDemoModeBanner] = useState<boolean>(true);
   const [isDemoMode, setIsDemoMode]         = useState<boolean>(false);
 
-  // â”€â”€ Simulator State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // --- Simulator State ------------------------------------------------------------
   const [simMessage, setSimMessage]             = useState("");
   const [isSimulating, setIsSimulating]         = useState(false);
   const [isBackfilling, setIsBackfilling]       = useState(false);
@@ -127,21 +145,25 @@ export default function App() {
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
   const [jiraLoading, setJiraLoading]           = useState<Record<string, boolean>>({});
 
-  // â”€â”€ Issues-Only filter (default ON â€” hides General Question, Praise, Spam) â”€â”€
+  // -- Issues-Only filter (default ON - hides General Question, Praise, Spam) --
   const [showIssuesOnly, setShowIssuesOnly] = useState<boolean>(true);
 
-  // â”€â”€ Backfill progress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Backfill progress -----------------------------------------------------
   const [backfillProgress, setBackfillProgress] = useState<{ running: boolean; total: number; done: number; ingested: number; skipped: number } | null>(null);
   const backfillPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // â”€â”€ Benchmark state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Benchmark state ---------------------------------------
   const [evalResults, setEvalResults]   = useState<any>(null);
   const [evalLoading, setEvalLoading]   = useState<boolean>(false);
-  const [showBenchmark, setShowBenchmark] = useState<boolean>(false);;
+  const [showBenchmark, setShowBenchmark] = useState<boolean>(false);
+  const [testMessageText, setTestMessageText] = useState("");
+  const [testMessageLoading, setTestMessageLoading] = useState(false);
+  const [testMessageResult, setTestMessageResult] = useState<any>(null);
+  const [testMessageError, setTestMessageError] = useState("");
 
-  // â”€â”€ Filters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Filters ----------------------------------------------------------------
   const [filterCategory, setFilterCategory]     = useState<string>("All");
-  const [filterUrgency, setFilterUrgency]       = useState<string>("All");
+
   const [filterStatus, setFilterStatus]         = useState<string>("All");
   const [filterDays, setFilterDays]             = useState<string>("30");
   const [filterStartDate, setFilterStartDate]   = useState<string>("");
@@ -149,13 +171,13 @@ export default function App() {
   const [searchQuery, setSearchQuery]           = useState<string>("");
   const [urgencyFilter, setUrgencyFilter]       = useState<string>("All"); // Feature 7 quick filter
 
-  // â”€â”€ Pagination â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Pagination -------------------------------------------------------------
   const [currentPage, setCurrentPage]     = useState<number>(1);
   const [itemsPerPage, setItemsPerPage]   = useState<number>(20);
   const [totalTickets, setTotalTickets]   = useState<number>(0);
   const [globalStats, setGlobalStats]     = useState<any>(null);
 
-  // â”€â”€ Notification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Notification -----------------------------------------------------------
   const [notification, setNotification] = useState<{ message: string; visible: boolean; type: "success" | "info" }>({
     message: "", visible: false, type: "success",
   });
@@ -165,19 +187,17 @@ export default function App() {
     setTimeout(() => setNotification(prev => ({ ...prev, visible: false })), 5000);
   }, []);
 
-  // â”€â”€ Token helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const getToken = useCallback((): string => {
-    return sessionStorage.getItem("pd_token") || localStorage.getItem("PULSEDESK_ADMIN_KEY") || "";
-  }, []);
 
-  // â”€â”€ Reset page on filter change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Reset page on filter change --------------------------------------------
   useEffect(() => {
     setCurrentPage(1);
-  }, [filterCategory, filterUrgency, filterStatus, filterDays, filterStartDate, filterEndDate, searchQuery, itemsPerPage, urgencyFilter]);
+  }, [filterCategory, filterStatus, filterDays, filterStartDate, filterEndDate, searchQuery, itemsPerPage, urgencyFilter]);
 
   const formatTicketDate = useCallback((dateStr: string) => {
+    if (!dateStr) return "";
     try {
       const d = parseISO(dateStr);
+      if (isNaN(d.getTime())) return dateStr;
       if (isToday(d))     return `Today, ${format(d, "HH:mm")}`;
       if (isYesterday(d)) return `Yesterday, ${format(d, "HH:mm")}`;
       return format(d, "MMM d, HH:mm");
@@ -186,7 +206,7 @@ export default function App() {
     }
   }, []);
 
-  // â”€â”€ apiFetch â€” reads token from sessionStorage / localStorage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- apiFetch - reads token from sessionStorage / localStorage --------------
   const apiFetch = useCallback(async (endpoint: string, options: RequestInit = {}) => {
     const token = getToken();
     const res = await fetch(endpoint, {
@@ -214,7 +234,7 @@ export default function App() {
     return res;
   }, [getToken]);
 
-  // â”€â”€ T1-B: Login handler (calls POST /api/auth/login) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- T1-B: Login handler (calls POST /api/auth/login) ----------------------
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!passwordInput.trim()) return;
@@ -264,17 +284,10 @@ export default function App() {
     setTickets([]);
   }, [apiFetch]);
 
-  // â”€â”€ Data fetching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Data fetching ----------------------------------------------------------
   useEffect(() => {
     if (isAuthenticated) fetchCommunities();
   }, [isAuthenticated]);
-
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    fetchTickets();
-    const interval = setInterval(fetchTickets, 5000);
-    return () => clearInterval(interval);
-  }, [isAuthenticated, selectedCommunity, filterUrgency, filterStatus, filterCategory, currentPage, itemsPerPage, showIssuesOnly]);
 
   const fetchCommunities = async () => {
     try {
@@ -293,7 +306,7 @@ export default function App() {
     try {
       const params = new URLSearchParams();
       if (selectedCommunity) params.set("group_id", selectedCommunity);
-      if (filterUrgency  !== "All") params.set("urgency",  filterUrgency);
+
       if (urgencyFilter !== "All") params.set("urgency", urgencyFilter);
       if (filterStatus   !== "All") params.set("status",   filterStatus);
       if (filterCategory !== "All") params.set("category", filterCategory);
@@ -328,9 +341,19 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [apiFetch, selectedCommunity, filterUrgency, filterStatus, filterCategory, currentPage, itemsPerPage, showIssuesOnly]);
+  }, [apiFetch, selectedCommunity, filterStatus, filterCategory, currentPage, itemsPerPage, showIssuesOnly, urgencyFilter, filterDays, filterStartDate, filterEndDate, searchQuery]);
 
-  // â”€â”€ Ticket actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    fetchTickets();
+    // Use a fixed interval without recreating it on every render unless auth changes
+    const interval = setInterval(() => {
+      fetchTickets();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, fetchTickets]);
+
+  // -- Ticket actions ---------------------------------------------------------
   const handleUpdateStatus = useCallback(async (ticketId: string, newStatus: string) => {
     try {
       const res = await apiFetch(`/api/tickets/${ticketId}/status`, {
@@ -373,11 +396,11 @@ export default function App() {
     }
   }, [apiFetch, showNotification]);
 
-  // â”€â”€ Filtering (client-side on top of server filters) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Filtering (client-side on top of server filters) -----------------------
   const filteredTickets = useMemo(() => {
     return tickets;
   }, [tickets]);
-  // â”€â”€ Simulator / Backfill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Simulator / Backfill --------------------------------------------------
   const simulateIngestion = async () => {
     if (!simMessage.trim()) return;
     setIsSimulating(true);
@@ -424,7 +447,7 @@ export default function App() {
               backfillPollRef.current = null;
               setIsBackfilling(false);
               fetchTickets();
-              setBackfillStatus({ message: `âœ… Done: ${pd.ingested} classified, ${pd.skipped} skipped out of ${pd.total}`, isError: false });
+              setBackfillStatus({ message: `✅ Done: ${pd.ingested} classified, ${pd.skipped} skipped out of ${pd.total}`, isError: false });
             }
           } catch { /* silent */ }
         }, 2000);
@@ -439,13 +462,18 @@ export default function App() {
     }
   };
 
-  // â”€â”€ Run AI accuracy benchmark â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const runBenchmark = async () => {
+  // -- Run AI accuracy benchmark ----------------------------------------------
+  const runBenchmark = async (customMessages?: any[]) => {
     setEvalLoading(true);
     setEvalResults(null);
     setShowBenchmark(true);
     try {
-      const res  = await apiFetch("/api/eval");
+      const options: RequestInit = {};
+      if (customMessages) {
+        options.method = "POST";
+        options.body = JSON.stringify({ messages: customMessages });
+      }
+      const res  = await apiFetch("/api/eval", options);
       const data = await res.json();
       setEvalResults(data);
     } catch (e: any) {
@@ -454,9 +482,48 @@ export default function App() {
     setEvalLoading(false);
   };
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const runLiveTest = async () => {
+    if (!testMessageText.trim()) return;
+    setTestMessageLoading(true);
+    setTestMessageResult(null);
+    setTestMessageError("");
+    try {
+      const res = await apiFetch("/api/test-message", {
+        method: "POST",
+        body: JSON.stringify({ text: testMessageText }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Failed to test message");
+      setTestMessageResult(data.classification);
+    } catch (e: any) {
+      setTestMessageError(e.message);
+    } finally {
+      setTestMessageLoading(false);
+    }
+  };
+
+  const handleBenchmarkUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed)) throw new Error("JSON must be an array of messages");
+        await runBenchmark(parsed);
+      } catch (err: any) {
+        alert("Invalid JSON file: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // -------------------------------------------------------------------------
   // RENDER: Login Screen
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -------------------------------------------------------------------------
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden">
@@ -494,9 +561,9 @@ export default function App() {
     );
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -------------------------------------------------------------------------
   // STATS
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -------------------------------------------------------------------------
   const ticketsToday    = globalStats?.ticketsTodayCount || 0;
   const openCount       = globalStats?.openCount || 0;
   const activeCount     = globalStats?.activeCount || 0;
@@ -513,7 +580,16 @@ export default function App() {
   ) : 0;
   const resolutionRate  = globalStats?.resolutionRate || 0;
 
-  // â”€â”€ Chart Data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const getKpiTitle = (baseTitle: string) => {
+    const parts = [];
+    if (filterCategory !== "All") parts.push(filterCategory);
+    else if (urgencyFilter !== "All") parts.push(urgencyFilter);
+    
+    if (parts.length > 0) return `${parts.join(" ")} ${baseTitle}`;
+    return baseTitle;
+  };
+
+  // -- Chart Data -------------------------------------------------------------
   let maxDays = filterDays === "All" ? 30 : filterDays === "Custom" ? 30 : parseInt(filterDays);
   let refDate = new Date();
   if (filterDays === "Custom" && filterStartDate && filterEndDate) {
@@ -528,7 +604,19 @@ export default function App() {
     const d       = subDays(refDate, (maxDays - 1) - i);
     const dateStr = format(d, "MMM dd");
     const rawData = globalStats?.rawStatsData || [];
-    return { date: dateStr, tickets: rawData.filter((t: any) => t.created_at && format(parseISO(t.created_at), "MMM dd") === dateStr).length };
+    return { 
+      date: dateStr, 
+      tickets: rawData.filter((t: any) => {
+        if (!t.created_at) return false;
+        try {
+          const parsed = parseISO(t.created_at);
+          if (isNaN(parsed.getTime())) return false;
+          return format(parsed, "MMM dd") === dateStr;
+        } catch {
+          return false;
+        }
+      }).length 
+    };
   });
 
   const categoryData = globalStats?.categoryCount ? Object.entries(globalStats.categoryCount).map(([name, value]) => ({ name, value })) : [];
@@ -537,9 +625,9 @@ export default function App() {
   const totalPages      = Math.ceil(totalTickets / itemsPerPage);
   const paginatedTickets = filteredTickets;  // server already paginates
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -------------------------------------------------------------------------
   // RENDER: Dashboard
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -------------------------------------------------------------------------
   return (
     <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12">
       {/* Toast Notification */}
@@ -555,7 +643,7 @@ export default function App() {
         <div className="relative z-20 bg-amber-500/10 border-b border-amber-500/20 px-6 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold">
             <AlertTriangle className="w-4 h-4" />
-            <span>DEMO MODE â€” You are viewing sample data. Set <code className="font-mono bg-amber-500/10 px-1 rounded">DEMO_MODE=false</code> to use live data.</span>
+            <span>DEMO MODE - You are viewing sample data. Set <code className="font-mono bg-amber-500/10 px-1 rounded">DEMO_MODE=false</code> to use live data.</span>
           </div>
           <button onClick={() => setDemoModeBanner(false)} className="text-amber-400 hover:text-amber-300 transition">
             <X className="w-4 h-4" />
@@ -597,7 +685,7 @@ export default function App() {
             title="AI Accuracy Benchmark"
             className="bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md hover:bg-indigo-500/10 hover:border-indigo-500/30 transition text-[10px] font-bold text-white/50 hover:text-indigo-300 uppercase tracking-widest flex items-center gap-1.5"
           >
-            ðŸŽ¯ Benchmark
+            🎯 Benchmark
           </button>
           <button
             onClick={handleLogout}
@@ -677,15 +765,15 @@ export default function App() {
                 {backfillStatus.message}
               </div>
             )}
-            {/* Live backfill progress bar â€” show as soon as backfill is running */}
+            {/* Live backfill progress bar - show as soon as backfill is running */}
             {backfillProgress && (
               <div className="mt-3 space-y-1">
                 <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-white/50">
                   <span className={backfillProgress.running ? "text-indigo-400" : "text-emerald-400"}>
-                    {backfillProgress.running ? `â³ Processing... (${backfillProgress.done}/${backfillProgress.total})` : `âœ… Complete`}
+                    {backfillProgress.running ? `[WAIT] Processing... (${backfillProgress.done}/${backfillProgress.total})` : `✅ Complete`}
                   </span>
                   <span>
-                    {backfillProgress.ingested} classified &nbsp;Â·&nbsp; {backfillProgress.skipped} skipped out of {backfillProgress.total}
+                    {backfillProgress.ingested} classified &nbsp;-&nbsp; {backfillProgress.skipped} skipped out of {backfillProgress.total}
                   </span>
                 </div>
                 <div className="w-full bg-white/10 rounded-full h-2.5 overflow-hidden">
@@ -698,7 +786,7 @@ export default function App() {
             )}
           </div>
 
-          {/* Feature 7: Urgency Filter Pills â€” Low is opt-in (hidden by default in Issues Only mode) */}
+          {/* Feature 7: Urgency Filter Pills - Low is opt-in (hidden by default in Issues Only mode) */}
           <div className="flex items-center gap-2 flex-wrap mb-2">
             {(["All", "Critical", "High", "Medium", "Low"] as const).map(level => (
               <button
@@ -757,15 +845,7 @@ export default function App() {
                 <option value="Dismissed">Dismissed</option>
               </select>
             </div>
-            <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
-              <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterUrgency} onChange={e => setFilterUrgency(e.target.value)}>
-                <option value="All">All Urgency</option>
-                <option value="Critical">Critical</option>
-                <option value="High">High</option>
-                <option value="Medium">Medium</option>
-                <option value="Low">Low</option>
-              </select>
-            </div>
+
             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
               <select className="bg-transparent text-sm text-white/80 outline-none appearance-none px-3 cursor-pointer [&>option]:text-black" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
                 <option value="All">All Categories</option>
@@ -774,10 +854,10 @@ export default function App() {
                 ))}
               </select>
             </div>
-            {(filterDays !== "All" || filterStatus !== "All" || filterUrgency !== "All" || filterCategory !== "All" || filterStartDate || filterEndDate || searchQuery || urgencyFilter !== "All") && (
+            {(filterDays !== "All" || filterStatus !== "All" || filterCategory !== "All" || filterStartDate || filterEndDate || searchQuery || urgencyFilter !== "All") && (
               <button
                 onClick={() => {
-                  setFilterDays("All"); setFilterStatus("All"); setFilterUrgency("All");
+                  setFilterDays("All"); setFilterStatus("All"); 
                   setFilterCategory("All"); setFilterStartDate(""); setFilterEndDate("");
                   setSearchQuery(""); setUrgencyFilter("All");
                 }}
@@ -792,8 +872,10 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold">{urgencyFilter !== "All" ? `${urgencyFilter} Active Issues` : "Active Issues"}</p>
-                <AlertTriangle className={`w-5 h-5 ${activeCount > 0 ? "text-rose-500" : "text-rose-500/40"}`} />
+                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTitle("Active Issues")}>
+                  {getKpiTitle("Active Issues")}
+                </p>
+                <AlertTriangle className={`w-5 h-5 shrink-0 ml-2 ${activeCount > 0 ? "text-rose-500" : "text-rose-500/40"}`} />
               </div>
               <div className="flex items-end justify-between w-full">
                 <span className={`text-4xl font-bold ${activeCount > 0 ? "text-rose-500" : "text-rose-500/80"}`}>{activeCount}</span>
@@ -801,7 +883,9 @@ export default function App() {
             </div>
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold">In Review</p>
+                <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold truncate" title={getKpiTitle("In Review")}>
+                  {getKpiTitle("In Review")}
+                </p>
               </div>
               <div className="flex items-end justify-between w-full">
                 <span className={`text-4xl font-bold ${escalatedCount > 0 ? "text-amber-500" : "text-amber-500/80"}`}>{escalatedCount}</span>
@@ -809,10 +893,14 @@ export default function App() {
             </div>
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold">Resolved Today</p>
+                <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold truncate" title={getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}>
+                  {getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}
+                </p>
               </div>
               <div className="flex items-end justify-between w-full">
-                <span className={`text-4xl font-bold ${resolvedTodayCount > 0 ? "text-emerald-500" : "text-emerald-500/80"}`}>{resolvedTodayCount}</span>
+                <span className={`text-4xl font-bold ${(filterDays === "1" ? resolvedTodayCount : resolvedCount) > 0 ? "text-emerald-500" : "text-emerald-500/80"}`}>
+                  {filterDays === "1" ? resolvedTodayCount : resolvedCount}
+                </span>
               </div>
             </div>
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
@@ -865,8 +953,8 @@ export default function App() {
                           </ResponsiveContainer>
                         </div>
                         <div className="w-full flex justify-center space-x-6">
-                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2" /><span className="text-sm text-white/80 mr-2">Resolved</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[0].value}</span></div>
-                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Open</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1].value}</span></div>
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2" /><span className="text-sm text-white/80 mr-2">Resolved</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[0]?.value || 0}</span></div>
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Open</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1]?.value || 0}</span></div>
                         </div>
                       </div>
                     )}
@@ -923,7 +1011,7 @@ export default function App() {
                       ? "bg-indigo-500/20 text-indigo-300 border-indigo-500/40 hover:bg-indigo-500/30"
                       : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20"
                   }`}
-                  title={showIssuesOnly ? "Showing issues only â€” click to show ALL messages including general chat" : "Showing ALL messages â€” click to show issues only"}
+                  title={showIssuesOnly ? "Showing issues only - click to show ALL messages including general chat" : "Showing ALL messages - click to show issues only"}
                 >
                   {showIssuesOnly ? (
                     <><span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block" />Issues Only<span className="opacity-50 font-normal normal-case">({totalTickets})</span></>
@@ -1047,10 +1135,14 @@ export default function App() {
                                         return (
                                           <div className="space-y-4">
                                             <div>
-                                              <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2 flex items-center justify-between">
-                                                <span>Customer's Original Message</span>
+                                              <div className="text-[10px] font-bold uppercase tracking-widest mb-2 flex items-center justify-between">
+                                                {ticket.is_admin_message ? (
+                                                  <span className="text-emerald-400">Admin Message</span>
+                                                ) : (
+                                                  <span className="text-white/30">Customer's Original Message</span>
+                                                )}
                                               </div>
-                                              <div className="bg-white/5 p-4 rounded-xl text-sm text-white/80 leading-relaxed whitespace-pre-wrap border border-white/5 font-mono">
+                                              <div className={`p-4 rounded-xl text-sm leading-relaxed whitespace-pre-wrap border font-mono ${ticket.is_admin_message ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-100' : 'bg-white/5 border-white/5 text-white/80'}`}>
                                                 {originalMsg}
                                               </div>
                                               
@@ -1116,7 +1208,7 @@ export default function App() {
                                           <div className="text-sm text-white/90 font-medium">{ticket.sentiment}</div>
                                         </div>
 
-                                        {/* Gemini suggested reply â€” only show when the AI generated one */}
+                                        {/* Gemini suggested reply - only show when the AI generated one */}
                                         {ticket.suggested_reply && (
                                           <div className="col-span-2 mt-2">
                                             <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">
@@ -1159,7 +1251,7 @@ export default function App() {
                                               <CheckCircle className="w-4 h-4 mr-2" /> Mark Resolved
                                             </button>
 
-                                            {/* Feature 4: Jira button â€” only on Critical/High without existing Jira key */}
+                                            {/* Feature 4: Jira button - only on Critical/High without existing Jira key */}
                                             {(ticket.urgency === "Critical" || ticket.urgency === "High") && !ticket.jira_issue_key && (
                                               <button
                                                 id={`jira-btn-${ticket.id}`}
@@ -1200,7 +1292,7 @@ export default function App() {
                 {totalPages > 1 && (
                   <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 pb-6">
                     <div className="text-[10px] uppercase font-bold text-white/40 tracking-widest">
-                      Showing {(currentPage - 1) * itemsPerPage + 1}â€“{Math.min(currentPage * itemsPerPage, totalTickets)} of {totalTickets} messages
+                      Showing {(currentPage - 1) * itemsPerPage + 1}-{Math.min(currentPage * itemsPerPage, totalTickets)} of {totalTickets} messages
                     </div>
                     <div className="flex items-center space-x-4">
                       <div className="flex items-center space-x-2">
@@ -1230,24 +1322,73 @@ export default function App() {
           </div>
         </main>
 
-        {/* â”€â”€ Benchmark Panel â”€â”€ */}
+        {/* -- Benchmark Panel -- */}
         {showBenchmark && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             <div className="bg-[#0d1117] border border-white/10 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
               {/* Header */}
               <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-bold text-white">ðŸŽ¯ AI Classifier Accuracy Benchmark</h2>
-                  <p className="text-xs text-white/40 mt-0.5">20 gold-standard labelled messages â€” measures category &amp; urgency accuracy</p>
+                  <h2 className="text-base font-bold text-white">🎯 AI Classifier Accuracy Benchmark & Sandbox</h2>
+                  <p className="text-xs text-white/40 mt-0.5">Test individual messages or evaluate 20 gold-standard labeled cases</p>
                 </div>
-                <button onClick={() => setShowBenchmark(false)} className="text-white/40 hover:text-white transition p-1 rounded-lg hover:bg-white/10">âœ•</button>
+                <button onClick={() => setShowBenchmark(false)} className="text-white/40 hover:text-white transition p-1 rounded-lg hover:bg-white/10">x</button>
               </div>
 
               <div className="overflow-y-auto flex-1 p-6">
+                {/* Live Sandbox Section */}
+                <div className="mb-8 bg-white/5 border border-white/10 rounded-xl p-5">
+                  <h3 className="text-sm font-bold text-white mb-2">Live Testing Sandbox</h3>
+                  <p className="text-xs text-white/50 mb-4">Type any message to see how the AI categorizes it instantly.</p>
+                  <div className="flex gap-3">
+                    <input
+                      type="text"
+                      className="flex-1 bg-black/50 border border-white/10 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                      placeholder="e.g. I can't withdraw my crypto..."
+                      value={testMessageText}
+                      onChange={e => setTestMessageText(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") runLiveTest() }}
+                      disabled={testMessageLoading}
+                    />
+                    <button
+                      onClick={runLiveTest}
+                      disabled={testMessageLoading || !testMessageText.trim()}
+                      className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold px-5 py-2 rounded-lg text-sm transition whitespace-nowrap"
+                    >
+                      {testMessageLoading ? "Testing..." : "Test Message"}
+                    </button>
+                  </div>
+                  {testMessageError && (
+                    <div className="mt-3 text-rose-400 text-xs">{testMessageError}</div>
+                  )}
+                  {testMessageResult && !testMessageError && (
+                    <div className="mt-4 bg-black/30 rounded-lg p-4 border border-white/5 flex gap-6">
+                      <div>
+                        <div className="text-[10px] text-white/40 uppercase font-bold tracking-wider mb-1">Predicted Category</div>
+                        <div className="text-sm font-medium text-indigo-400">{testMessageResult.category}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-white/40 uppercase font-bold tracking-wider mb-1">Predicted Urgency</div>
+                        <div className={`text-sm font-medium ${testMessageResult.urgency === 'Critical' ? 'text-rose-400' : testMessageResult.urgency === 'High' ? 'text-amber-400' : 'text-emerald-400'}`}>
+                          {testMessageResult.urgency}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-white/40 uppercase font-bold tracking-wider mb-1">Sentiment</div>
+                        <div className="text-sm font-medium text-white/70">{testMessageResult.sentiment}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3 mb-4">
+                  <h3 className="text-sm font-bold text-white">Batch Evaluation</h3>
+                  <div className="h-px bg-white/10 flex-1"></div>
+                </div>
                 {evalLoading && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-white/50 text-sm">Running 20 test messages through AI classifierâ€¦</p>
+                    <p className="text-white/50 text-sm">Running 20 test messages through AI classifier...</p>
                     <p className="text-white/30 text-xs">This takes ~30 seconds</p>
                   </div>
                 )}
@@ -1269,7 +1410,7 @@ export default function App() {
                           <div className={`text-4xl font-black text-${s.color}-400`}>{s.value}%</div>
                           <div className="text-xs text-white/50 mt-2 uppercase tracking-widest font-semibold">{s.label}</div>
                           <div className={`text-xs mt-1 text-${s.color}-400/70`}>
-                            {s.value >= 80 ? "âœ… Excellent" : s.value >= 60 ? "âš ï¸ Acceptable" : "âŒ Needs tuning"}
+                            {s.value >= 80 ? "✅ Excellent" : s.value >= 60 ? "⚠️ Acceptable" : "❌ Needs tuning"}
                           </div>
                         </div>
                       ))}
@@ -1283,8 +1424,8 @@ export default function App() {
                             <th className="px-4 py-3">Message</th>
                             <th className="px-4 py-3">Expected</th>
                             <th className="px-4 py-3">Predicted</th>
-                            <th className="px-4 py-3 text-center">Cat âœ“</th>
-                            <th className="px-4 py-3 text-center">Urg âœ“</th>
+                            <th className="px-4 py-3 text-center">Cat v</th>
+                            <th className="px-4 py-3 text-center">Urg v</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1299,8 +1440,8 @@ export default function App() {
                                 <div className={r.categoryMatch ? "text-emerald-400" : "text-rose-400"}>{r.predictedCategory}</div>
                                 <div className={r.urgencyMatch  ? "text-emerald-400/70" : "text-rose-400/70 text-[10px]"}>{r.predictedUrgency}</div>
                               </td>
-                              <td className="px-4 py-2.5 text-center">{r.categoryMatch ? "âœ…" : "âŒ"}</td>
-                              <td className="px-4 py-2.5 text-center">{r.urgencyMatch  ? "âœ…" : "âŒ"}</td>
+                              <td className="px-4 py-2.5 text-center">{r.categoryMatch ? "✅" : "❌"}</td>
+                              <td className="px-4 py-2.5 text-center">{r.urgencyMatch  ? "✅" : "❌"}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1318,14 +1459,20 @@ export default function App() {
 
               {/* Footer */}
               <div className="px-6 py-4 border-t border-white/10 flex justify-between items-center">
-                <p className="text-xs text-white/30">Tests {evalResults?.total || 20} messages Â· Uses same Groq llama-3.3-70b model as production</p>
-                <button
-                  onClick={runBenchmark}
-                  disabled={evalLoading}
-                  className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold px-4 py-2 rounded-lg transition"
-                >
-                  {evalLoading ? "Runningâ€¦" : "ðŸ”„ Run Benchmark"}
-                </button>
+                <p className="text-xs text-white/30">Tests {evalResults?.total || 20} messages - Uses llama-3.1-8b-instant model</p>
+                <div className="flex space-x-3">
+                  <label className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-4 py-2 rounded-lg transition cursor-pointer flex items-center">
+                    Upload Custom JSON
+                    <input type="file" accept=".json" onChange={handleBenchmarkUpload} className="hidden" disabled={evalLoading} />
+                  </label>
+                  <button
+                    onClick={() => runBenchmark()}
+                    disabled={evalLoading}
+                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold px-4 py-2 rounded-lg transition"
+                  >
+                    {evalLoading ? "Running..." : "🔄 Run Built-in Benchmark"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

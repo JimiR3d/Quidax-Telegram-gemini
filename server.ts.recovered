@@ -1,0 +1,72 @@
+Created At: 2026-06-08T16:48:50Z
+Completed At: 2026-06-08T16:48:51Z
+File Path: `file:///C:/Users/Jimi/Downloads/The%20Anti-Gravity/Quidax%20Telegram/server.ts`
+Total Lines: 1887
+Total Bytes: 90871
+Showing lines 300 to 400
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+300:       .select("keyword")
+301:       .gte("frequency", 2)         // only promote words seen ≥2 times
+302:       .eq("active", true)
+303:       .order("frequency", { ascending: false })
+304:       .limit(200);
+305:     if (error) return;
+306:     learnedKeywordCache = new Set((data || []).map((r: any) => r.keyword as string));
+307:     logger.info("Keywords", `Loaded ${learnedKeywordCache.size} learned keywords`);
+308:   } catch {
+309:     // non-fatal
+310:   }
+311: }
+312: 
+313: async function extractAndLearnKeywords(supabase: any, text: string): Promise<void> {
+314:   try {
+315:     const words = text.toLowerCase()
+316:       .replace(/[^a-z0-9\s]/g, " ")
+317:       .split(/\s+/)
+318:       .filter(w => w.length > 3 && !STOPWORDS.has(w));
+319: 
+320:     const unique = [...new Set(words)];
+321:     if (unique.length === 0) return;
+322: 
+323:     const now = new Date().toISOString();
+324:     for (const keyword of unique) {
+325:       // Insert or increment frequency — use raw SQL via rpc if available, else
+326:       // do a select-then-upsert pattern to correctly increment.
+327:       const { data: existing } = await supabase
+328:         .from("learned_keywords")
+329:         .select("frequency")
+330:         .eq("keyword", keyword)
+331:         .maybeSingle();
+332: 
+333:       if (existing) {
+334:         await supabase
+335:           .from("learned_keywords")
+336:           .update({ frequency: existing.frequency + 1, updated_at: now })
+337:           .eq("keyword", keyword);
+338:       } else {
+339:         await supabase
+340:           .from("l
+<truncated 3069 bytes>
+cerely apologise for the inconvenience and will update you within the hour.",
+380:     telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19482",
+381:     jira_issue_key: null, jira_issue_url: null,
+382:   },
+383:   {
+384:     id: "demo-2", created_at: new Date(Date.now() - 1000 * 60 * 8).toISOString(),
+385:     summary: "[ESCALATED] Account locked after failed 2FA — user cannot access funds",
+386:     category: "Account Access", urgency: "High", product_area: "Mobile App",
+387:     sentiment: "Frustrated", is_complaint: true, status: "In Review",
+388:     raw_text: "My account is locked. I tried to login and got a 2FA error so now I can't access my account. I have funds in there I need to trade. Please unlock it.",
+389:     suggested_action: "Verify identity via KYC records. Remove 24-hour security lock after confirming ownership.",
+390:     suggested_reply: "Hi! Account locks after failed 2FA are a standard security measure to protect you. Please send a selfie with your ID to our support channel so we can verify and unlock your account immediately.",
+391:     telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19476",
+392:     jira_issue_key: null, jira_issue_url: null,
+393:   },
+394:   {
+395:     id: "demo-3", created_at: new Date(Date.now() - 1000 * 60 * 22).toISOString(),
+396:     summary: "USDT deposit confirmed on-chain but not credited to Quidax wallet",
+397:     category: "Deposit Issue", urgency: "High", product_area: "Wallet",
+398:     sentiment: "Frustrated", is_complaint: true, status: "Open",
+399:     raw_text: "I sent 200 USDT (TRC20) over 2 hours ago. The transaction is confirmed on TronScan with 40 confirmations but my balance still shows 0. Txid: abc123...",
+400:     suggested_action: "Check TronScan transaction, cross-reference with internal deposit processor logs. Manually credit if confirmed.",
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

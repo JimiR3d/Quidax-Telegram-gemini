@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Google AI Studio App</title>
+    <script>
+      window.onerror = function(msg, url, line, col, error) {
+        var errDiv = document.createElement('div');
+        errDiv.style = "position: fixed; z-index: 999999; top: 0; left: 0; right: 0; background: red; color: white; padding: 20px; font-family: monospace; white-space: pre-wrap;";
+        errDiv.innerText = "Error: " + msg + "\n" + (error && error.stack ? error.stack : "");
+        document.body.appendChild(errDiv);
+      };
+      window.addEventListener('unhandledrejection', function(event) {
+        var errDiv = document.createElement('div');
+        errDiv.style = "position: fixed; z-index: 999999; top: 0; left: 0; right: 0; background: darkred; color: white; padding: 20px; font-family: monospace; white-space: pre-wrap;";
+        errDiv.innerText = "Unhandled Promise Rejection: " + (event.reason && event.reason.stack ? event.reason.stack : event.reason);
+        document.body.appendChild(errDiv);
+      });
+    </script>
+    <script type="module" crossorigin src="/assets/index-Dfzi-HQ3.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-_LoJruj-.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+

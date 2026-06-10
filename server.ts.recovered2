@@ -1,0 +1,2956 @@
+import express from "express";
+import path from "path";
+import fs from "fs";
+import { createServer as createViteServer } from "vite";
+import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
+import dotenv from "dotenv";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { z } from "zod";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+dotenv.config();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T1-A: STARTUP GUARD — fail fast with a clear message before any server starts
+// ─────────────────────────────────────────────────────────────────────────────
+const REQUIRED_ENV_VARS = [
+  "GROQ_API_KEY",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "DASHBOARD_PASSWORD",
+];
+
+const missingVars = REQUIRED_ENV_VARS.filter(
+  (key) => !process.env[key] || process.env[key] === ""
+);
+
+// Allow VITE_DASHBOARD_PASSWORD as a fallback for backward-compatibility
+if (
+  missingVars.includes("DASHBOARD_PASSWORD") &&
+  process.env.VITE_DASHBOARD_PASSWORD
+) {
+  process.env.DASHBOARD_PASSWORD = process.env.VITE_
+// MISSING LINE 36
+// MISSING LINE 37
+// MISSING LINE 38
+// MISSING LINE 39
+  console.error("[FATAL] Server cannot start. Set all required env vars and retry.");
+  process.exit(1);
+}
+
+console.log("[Startup] ✓ All required environment variables are present");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRUCTURED LOGGER — replaces raw console.log/error (T3-E)
+// ─────────────────────────────────────────────────────────────────────────────
+const logger = {
+  info:  (component: string, msg: string, data?: any) => console.log(JSON.stringify({ level: "info",  ts: new Date().toISOString(), component, msg, ...(data && { data }) })),
+  warn:  (component: string, msg: string, data?: any) => console.warn(JSON.stringify({ level: "warn",  ts: new Date().toISOString(), component, msg, ...(data && { data }) })),
+  error: (component: string, msg: string, data?: any) => console.error(JSON.stringify({ level: "error", ts: new Date().toISOString(), component, msg, ...(data && { data }) })),
+  debug: (component: string, msg: string, data?: any) => {
+    if (process.env.LOG_LEVEL === "debug") {
+      console.log(JSON.stringify({ level: "debug", ts: new Date().toISOString(), component, msg, ...(data && { data }) }));
+    }
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T2-A: CIRCUIT BREAKER
+// ─────────────────────────────────────────────────────────────────────────────
+type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
+
+class CircuitBreaker {
+  private state: CircuitState = "CLOSED";
+  private failureCount = 0;
+  private successCount = 0;
+  private nextAttemptAt = 0;
+
+  constructor(
+    public readonly name: string,
+    private readonly failureThreshold = 3,
+    private readonly successThreshold = 1,
+    private readonly openDurationMs = 30_000
+  ) {}
+
+  async call<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === "OPEN") {
+      if (Date.now() < this.nextAttemptAt) {
+        throw new Error(`[CircuitBreaker] ${this.name} is OPEN — fast-failing`);
+      }
+      this.state = "HALF_OPEN";
+      this.successCount = 0;
+    }
+
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return result;
+    } catch (err) {
+      this.onFailure();
+      throw err;
+    }
+  }
+
+  private onSuccess() {
+    this.failureCount = 0;
+    if (this.state === "HALF_OPEN") {
+      this.successCount++;
+      if (this.successCount >= this.successThreshold) {
+        this.state = "CLOSED";
+        logger.info("CircuitBreaker", `${this.name} circuit CLOSED`);
+      }
+    }
+  }
+
+  private onFailure() {
+    this.failureCount++;
+    if (this.failureCount >= this.failureThreshold || this.state === "HALF_OPEN") {
+      this.state = "OPEN";
+      this.nextAttemptAt = Date.now() + this.openDurationMs;
+      logger.error("CircuitBreaker", `${this.name} circuit OPENED`, { failureCount: this.failureCount });
+    }
+  }
+
+  getStatus() {
+    return { name: this.name, state: this.state, failureCount: this.failureCount };
+  }
+}
+
+const groqBreaker     = new CircuitBreaker("groq");
+const geminiBreaker   = new CircuitBreaker("gemini");
+const supabaseBreaker = new CircuitBreaker("supabase");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T2-B: TIMEOUT UTILITY
+// ─────────────────────────────────────────────────────────────────────────────
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`[Timeout] ${label} exceeded ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T1-C: PII REDACTION
+// ─────────────────────────────────────────────────────────────────────────────
+const PII_PATTERNS: [RegExp, string][] = [
+  [/\b\d{1
+// MISSING LINE 143
+  [/\bNIN\s*[:\-]?\s*\d{6,}/gi, "[NIN_REDACTED]"],
+  [/\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g, "[EMAIL_REDACTED]"],
+  [/\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11})\b/g, "[CARD_REDACTED]"],
+];
+
+function redactPII(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of PII_PATTERNS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function sanitizeForPrompt(input: string): string {
+  if (typeof input !== "string") return "";
+  const truncated = input.slice(0, 2000);
+  const injectionPatterns = [
+    /ignore (all |previous |above )?instructions/gi,
+    /you are now/gi,
+    /system prompt/gi,
+    /disregard/gi,
+    /jailbreak/gi,
+    /DAN mode/gi,
+  ];
+  let sanitized = truncated;
+  for (const pattern of injectionPatterns) {
+    sanitized = sanitized.replace(pattern, "[REDACTED]");
+  }
+  return sanitized;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T1-D: ZOD SCHEMA + parseAndValidateClassification
+// ─────────────────────────────────────────────────────────────────────────────
+const VALID_CATEGORIES = [
+  "Withdrawal Issue", "Deposit Issue", "KYC/Verification", "Trading Problem",
+  "App Bug", "Fee Complaint", "Account Access", "Network/Downtime",
+  "General Question", "Praise", "Spam/Irrelevant",
+] as const;
+
+// Categories that are informational — not actionable support tickets
+const NON_ESSENTIAL_CATEGORIES = new Set([
+  "General Question", "Praise", "Spam/Irrelevant",
+]);
+const VALID_URGENCIES     = ["Critical", "High", "Medium", "Low"] as const;
+const VALID_PRODUCT_AREAS = ["Wallet", "Exchange", "Mobile App", "Web Platform", "Identity/KYC", "Customer Support", "Other"] as const;
+const VALID_SENTIMENTS    = ["Frustrated", "Neutral", "Positive", "Confused"] as const;
+
+const TicketClassificationSchema = z.object({
+  category:         z.enum(VALID_CATEGORIES).catch("General Question"),
+  urgency:          z.enum(VALID_URGENCIES).catch("Medium"),
+  product_area:     z.enum(VALID_PRODUCT_AREAS).catch("Other"),
+  sentiment:        z.enum(VALID_SENTIMENTS).catch("Neutral"),
+  is_complaint:     z.boolean().catch(false),
+  suggested_action: z.string().min(1).catch("Follow up with user"),
+  summary:          z.string().min(1).catch("User inquiry"),
+});
+type TicketClassification = z.infer<typeof TicketClassificationSchema>;
+
+// Poison-pill fallback — never throws
+const CLASSIFICATION_FALLBACK: TicketClassification = {
+  category:         "General Question",
+  urgency:          "Low",
+  product_area:     "Other",
+  sentiment:        "Neutral",
+  is_complaint:     false,
+  suggested_action: "Follow up with user",
+  summary:          "Unable to classify message",
+};
+
+function parseAndValidateClassification(jsonStr: string): TicketClassification {
+  try {
+    const raw = JSON.parse(jsonStr);
+    // Handle 'priority' key if LLM used wrong field name
+    if (raw.priority && !raw.urgency) raw.urgency = raw.priority;
+    return TicketClassificationSchema.parse(raw);
+  } catch {
+    return CLASSIFICATION_FALLBACK;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE 2: SMART PRE-FILTER
+// ─────────────────────────────────────────────────────────────────────────────
+const ISSUE_SIGNALS = [
+  // Action/problem verbs
+  /\b(stuck|pending|fail|error|problem|issue|help|urgent|cannot|can't|won't|didn't|doesn't|broken|not working|missing|lost|wrong|blocked|gone|disappeared|reversed)\b/i,
+  // Crypto/finance actions
+  /\b(withdraw|deposit|transfer|send|receive|kyc|verify|login|password|account|fund|balance|trade|swap|exchange|buy|sell)\b/i,
+  // Question words
+  /\b(how|why|when|what|where)\b/i,
+  // Time pressure
+  /\b(days?|hours?|minutes?|weeks?)\b/i,
+  // Security / fraud
+  /\b(hacked|hack|scam|stolen|phishing|unauthorized|compromised|breach|fraud)\b/i,
+  // Nigerian financial identifiers & crypto identifiers
+  /[₦]|\b(BVN|NIN|NGN|TRC20|BEP20|ERC20|USDT|USDC|BTC|ETH|XRP|QDX)\b/i,
+  // Reference codes: alphanumeric 6+ chars that look like txids or bank refs
+  /\b[A-Z0-9]{6,}\b/,
+  // ALL-CAPS words 3+ chars (signals urgency: HELP, SOS, HACKED, etc.)
+  /\b[A-Z]{3,}\b/,
+];
+const CHATTER_PATTERNS = [
+  /^(gm|gn|gg|lol|lmao|haha|ok|okay|yes|no|sure|cool|wow|nice|great|thanks|thx|ty|np|brb|afk|omg|wtf|wagmi|ngmi|lfg|ser|fren|moon|wen|gm+)\b/i,
+  /^[^a-zA-Z]*[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{2600}-\u{26FF}]/u,
+];
+];
+
+function shouldProcessMessage(text: string, learnedKeywords: Set<string> = new Set()): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const words = trimmed.split(/\s+/);
+
+  // Check issue signals FIRST — before any length/word-count guards.
+  // A single powerful word like "HACKED" or a currency symbol must always pass.
+  for (const signal of ISSUE_SIGNALS) {
+    if (signal.test(trimmed)) return true;
+  }
+
+  // Check dynamically-learned keywords before chatter guard
+  const lower = trimmed.toLowerCase();
+  for (const kw of learnedKeywords) {
+    if (lower.includes(kw)) return true;
+  }
+
+  // Drop obvious chatter that matched no signal and is short (≤6 words)
+  for (const chatter of CHATTER_PATTERNS) {
+    if (chatter.test(trimmed) && words.length <= 6) return false;
+  }
+
+  // Drop very short messages that matched nothing (< 4 chars, e.g. emojis, 'gm')
+  if (trimmed.length < 4) return false;
+
+  // Default: let Groq decide for anything 8+ words
+  return words.length >= 8;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE 1: VOCABULARY LEARNING SYSTEM
+// ─────────────────────────────────────────────────────────────────────────────
+const STOPWORDS = new Set([
+  "the","a","an","is","are","was","were","be","been","being","have","has","had",
+  "do","does","did","will","would","could","should","may","might","shall","can",
+  "that","this","these","those","it","its","in","on","at","to","for","of","and",
+  "or","but","with","by","from","as","not","no","i","my","we","our","you","your",
+  "he","she","they","them","their","us","me","him","her","what","how","when",
+  "why","where","which","who","please","just","am","get","got","want","know",
+  "one","two","three","so","if","then","now","up","out","about","into","still",
+  "been","also","any","all","both","each","few","more","most","other","some",
+]);
+let learnedKeywordCache: Set<string> = new Set();
+
+async function refreshLearnedKeywords(supabase: any): Promise<void> {
+  try {
+    const { data, error } = await supabase
+      .from("learned_keywords")
+      .select("keyword")
+      .gte("frequency", 2)         // only promote words seen ≥2 times
+      .eq("active", true)
+      .order("frequency", { ascending: false })
+      .limit(200);
+    if (error) return;
+    learnedKeywordCache = new Set((data || []).map((r: any) => r.keyword as string));
+    logger.info("Keywords", `Loaded ${learnedKeywordCache.size} learned keywords`);
+  } catch {
+    // non-fatal
+  }
+}
+
+async function extractAndLearnKeywords(supabase: any, text: string): Promise<void> {
+  try {
+    const words = text.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 3 && !STOPWORDS.has(w));
+
+    const unique = [...new Set(words)];
+    if (unique.length === 0) return;
+
+    const now = new Date().toISOString();
+    for (const keyword of unique) {
+      // Insert or increment frequency — use raw SQL via rpc if available, else
+      // do a select-then-upsert pattern to correctly increment.
+      const { data: existing } = await supabase
+        .from("learned_keywords")
+        .select("frequency")
+        .eq("keyword", keyword)
+        .maybeSingle();
+
+      if (existing) {
+        await supabase
+          .from("learned_keywords")
+          .update({ frequency: existing.frequency + 1, updated_at: now })
+          .eq("keyword", keyword);
+      } else {
+        await supabase
+          .from("l
+// MISSING LINE 341
+// MISSING LINE 342
+// MISSING LINE 343
+// MISSING LINE 344
+// MISSING LINE 345
+// MISSING LINE 346
+// MISSING LINE 347
+// MISSING LINE 348
+// MISSING LINE 349
+// MISSING LINE 350
+// MISSING LINE 351
+// MISSING LINE 352
+// MISSING LINE 353
+// MISSING LINE 354
+// MISSING LINE 355
+// MISSING LINE 356
+// MISSING LINE 357
+// MISSING LINE 358
+// MISSING LINE 359
+// MISSING LINE 360
+// MISSING LINE 361
+// MISSING LINE 362
+// MISSING LINE 363
+// MISSING LINE 364
+// MISSING LINE 365
+// MISSING LINE 366
+// MISSING LINE 367
+// MISSING LINE 368
+// MISSING LINE 369
+const DEMO_TICKETS = [
+  {
+    id: "demo-1", created_at: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
+    summary: "[ESCALATED] NGN withdrawal stuck for 3 days, user threatening chargeback",
+    category: "Withdrawal Issue", urgency: "Critical", product_area: "Wallet",
+    sentiment: "Frustrated", is_complaint: true, status: "In Review",
+    raw_text: "I have been trying to withdraw my NGN since Friday and nothing has arrived in my bank. It says 'pending' on the app. This is ₦450,000. If it is not resolved today I am reporting to CBN and doing a chargeback.",
+    suggested_action: "Escalate to Finance team immediately. Manually push payment. Call user if possible.",
+    suggested_reply: "Hi, I completely understand your frustration regarding the delayed withdrawal. I've escalated this directly to our Finance team to push it through manually right now. We sincerely apologise for the inconvenience and will update you within the hour.",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19482",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19482",
+    jira_issue_key: null, jira_issue_url: null,
+  },
+  {
+    id: "demo-2", created_at: new Date(Date.now() - 1000 * 60 * 8).toISOString(),
+    summary: "[ESCALATED] Account locked after failed 2FA — user cannot access funds",
+    category: "Account Access", urgency: "High", product_area: "Mobile App",
+    sentiment: "Frustrated", is_complaint: true, status: "In Review",
+    raw_text: "My account is locked. I tried to login and got a 2FA error so now I can't access my account. I have funds in there I need to trade. Please unlock it.",
+    suggested_action: "Verify identity via KYC records. Remove 24-hour security lock after confirming ownership.",
+    suggested_reply: "Hi! Account locks after failed 2FA are a standard security measure to protect you. Please send a selfie with your ID to our support channel so we can verify and unlock your account immediately.",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19476",
+    jira_issue_key: null, jira_issue_url: null,
+  },
+  {
+    id: "demo-3", created_at: new Date(Date.now() - 1000 * 60 * 22).toISOString(),
+    summary: "USDT deposit confirmed on-chain but not credited to Quidax wallet",
+    category: "Deposit Issue", urgency: "High", product_area: "Wallet",
+    sentiment: "Frustrated", is_complaint: true, status: "Open",
+    raw_text: "I sent 200 USDT (TRC20) over 2 hours ago. The transaction is confirmed on TronScan with 40 confirmations but my balance still shows 0. Txid: abc123...",
+    suggested_action: "Check TronScan transaction, cross-reference with internal deposit processor logs. Manually credit if confirmed.",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19461",
+    jira_issue_key: null, jira_issue_url: null,
+  },
+  {
+    id: "demo-4", created_at: new Date(Date.now() - 1000 * 60 * 35).toISOString(),
+    summary: "KYC Tier 2 stuck in review for 6 days — NIN submitted",
+    category: "KYC/Verification", urgency: "Medium", product_area: "Identity/KYC",
+    sentiment: "Neutral", is_complaint: false, status: "Open",
+    raw_text: "Hi, I submitted my NIN slip and selfie 6 days ago for Tier 2 upgrade. My account still shows Tier 1. Can someone please check?",
+    suggested_action: "Look up KYC record in admin portal. Approve if valid, reject with clear reason if not.",
+    suggested_reply: "Hello! Thanks for your patience. I've located your application and escalated it for manual review — you should receive a decision within 24 hours.",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19449",
+    jira_issue_key: null, jira_issue_url: null,
+  },
+  {
+    id: "demo-5", created_at: new Date(Date.now() - 1000 * 60 * 55).toISOString(),
+    summary: "Fee complaint — unexpected trading fee charged on BTC/USDT swap",
+    category: "Fee Complaint", urgency: "Low", product_area: "Exchange",
+    sentiment: "Confused", is_compla
+  app.set("trust proxy", 1);
+
+  // ── Security Middleware ──────────────────────────────────────────────────────
+  if (process.env.NODE_ENV === "production") {
+    app.use(helmet());
+  } else {
+    app.use(helmet({ contentSecurityPolicy: false }));
+  }
+    summary: "App crash on Android when navigating to portfolio screen",
+    category: "App Bug", urgency: "Medium", product_area: "Mobile App",
+    sentiment: "Frustrated", is_complaint: true, status: "Open",
+    raw_text: "The app crashes every time I click on Portfolio. I'm on Android 14, Quidax app v4.2.1. It started after the last update yesterday.",
+    suggested_action: "Log as bug report. Collect device info. Check crash logs in Firebase Crashlytics for v4.2.1 spike.",
+    suggested_reply: "Thanks for the detailed report! I've logged this as a bug with our engineering team. As a temporary workaround, try clearing the app cache. We're aiming to push a fix in the next app update.",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19432",
+    jira_issue_key: null, jira_issue_url: null,
+  },
+  {
+    id: "demo-7", created_at: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+    summary: "Processing message...", category: "Other", urgency: "Low",
+    product_area: "Other", sentiment: "Neutral", is_complaint: false,
+    status: "Classifying", raw_text: "Why is my withdrawal still showing processing?",
+    suggested_action: "Pending classification...", suggested_reply: null,
+    telegram_deep_link: null, jira_issue_key: null, jira_issue_url: null,
+  },
+  {
+    id: "demo-8", created_at: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
+    summary: "Positive feedback on new QDX staking feature",
+    category: "Praise", urgency: "Low", product_area: "Other",
+    sentiment: "Positive", is_complaint: false, status: "Resolved",
+    raw_text: "Just want to say the new QDX staking feature is amazing! Got my first rewards this morning. Keep it up team! 🚀",
+    suggested_action: "Acknowledge and thank user. No further action required.",
+    suggested_reply: "Thank you so much, this means a lot to the team! Really glad you're enjoying staking. More features coming soon 🙌",
+    telegram_deep_link: "https://t.me/OfficialQuidaxCommunity/19401",
+    jira_issue_key: null, jira_issue_url: null,
+  },
+];
+
+async function startServer() {
+  const app = express();
+
+  const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+
+  // Trust reverse proxy (Cloud Run / Railway)
+  app.set("trust proxy", 1);
+
+  // ── Security Middleware ──────────────────────────────────────────────────────
+  if (process.env.NODE_ENV === "production") {
+    app.use(helmet());
+  } else {
+    app.use(helmet({ contentSecurityPolicy: false }));
+  }
+
+  // T2-C: Cache-Control: no-store on ALL /api/ routes
+  app.use("/api/", (_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    next();
+  });
+
+  // T3-D: Body size limit
+  app.use(express.json({ limit: "1mb" }));
+
+  // Rate limiting
+  const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    message: { error: "Too many requests from this IP, please try again later." },
+    validate: { trustProxy: false, xForwardedForHeader: false },
+  });
+  app.use("/api/", limiter);
+
+  const heavyLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: { error: "Too many requests to this endpoint. Please try again later." },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    message: { error: "Too many login attempts. Please try again later." },
+  });
+
+  // ── T1-B: Auth helpers ──────────────────────────────────────────────────────
+  const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD!;
+  const SUPPORT_GROUP_ID   = process.env.SUPPORT_GROUP_ID || "OfficialQuidaxCommunity";
+
+  function timingSafeStringCompare(a: string, b: string): boolean {
+    const aBuf = Buffer.from(a.padEnd(64, "\0").substring(0, 64));
+    const bBuf = Buffer.from(b.padEnd(64, "\0").substring(0, 64));
+    try {
+      return crypto.timingSafeEqual(aBuf, bBuf) && a.length === b.length;
+    } catch {
+      return false;
+    }
+  }
+
+  function generateToken(): string {
+    return crypto.randomBytes(32).toString("hex");
+  }
+
+  // In-memory token store (sufficient for demo/single-instance)
+  const activeTokens = new Map<string, { role: string; tenantId: string | null; userId: string; expiresAt: number }>();
+
+  function getAuthContext(req: express.Request) {
+    const authHeader = req.headers.authorization;
+    const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const legacyKey   = req.headers["x-admin-key"] as string | undefined;
+
+    // Try Bearer token first (new 
+    }
+  }
+
+  // ── Initialize OpenAI (Groq) ──────────────────────────────────────────────
+  const openai = new OpenAI({
+    apiKey: process.env.GROQ_API_KEY!,
+    baseURL: "https://api.groq.com/openai/v1",
+  });
+
+  // ── Initialize Gemini ─────────────────────────────────────────────────────
+  let genAI: any = null;
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const { GoogleGenerativeAI } = await import("@google/generative-ai");
+      genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    } catch (e: any) {
+      logger.warn("Gemini", "Failed to init GoogleGenerativeAI", { error: e.message });
+    }
+  }
+
+  // ── Admin cache (T2-C concept: fast-path from env) ────────────────────────
+  let cachedAdmins = new Set<string>();
+  let lastAdminFetch = 0;
+
+  const TELEGRAM_ADMIN_USER_IDS = (process.env.TELEGRAM_ADMIN_USER_IDS || "")
+    .split(",")
+  function getSupabase() {
+    return createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+  }
+
+  // ── Audit log helper ──────────────────────────────────────────────────────
+  async function logAuditAction(supabase: any, actorId: string, action: string, target: string, oldState: any, newState: any, ip: string) {
+    try {
+      await supabase.from("audit_logs").insert({
+        actor_id: actorId, action, target_resource: target,
+        previous_state: oldState, new_state: newState, ip_address: ip,
+      });
+    } catch (e: any) {
+      logger.warn("Audit", "Failed to write audit log", { error: e.message });
+    }
+  }
+
+  // ── Initialize OpenAI (Groq) ──────────────────────────────────────────────
+  const openai = new OpenAI({
+    apiKey: process.env.GROQ_API_KEY!,
+    baseURL: "https://api.groq.com/openai/v1",
+  });
+
+  // ── Initialize Gemini ─────────────────────────────────────────────────────
+  let genAI: any = null;
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const { GoogleGenerativeAI } = await import("@google/generative-ai");
+      genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    } catch (e: any) {
+      logger.warn("Gemini", "Failed to init GoogleGenerativeAI", { error: e.message });
+    }
+  }
+
+  // ── Admin cache (T2-C concept: fast-path from env) ────────────────────────
+  let cachedAdmins = new Set<string>();
+  let lastAdminFetch = 0;
+
+  const TELEGRAM_ADMIN_USER_IDS = (process.env.TELEGRAM_ADMIN_USER_IDS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+  if (TELEGRAM_ADMIN_USER_IDS.length > 0) {
+    cachedAdmins = new Set(TELEGRAM_ADMIN_USER_IDS);
+  }
+
+  async function checkIsAdmin(groupId: string, senderId?: any): Promise<boolean> {
+    if (!senderId) return false;
+    // Fast-path: env var list
+    if (cachedAdmins.has(String(senderId))) return true;
+    if (!tlClient) return false;
+
+    if (Date.now() - lastAdminFetch > 1000 * 60 * 60) {
+      try {
+        const { Api } = await import("telegram");
+        const participants = await tlClient.invoke(
+          new Api.channels.GetParticipants({
+            channel: groupId,
+            filter: new Api.ChannelParticipantsAdmins() as any,
+            offset: 0,
+            limit: 100,
+            hash: 0 as any,
+          })
+        );
+        cachedAdmins = new Set([
+          ...TELEGRAM_ADMIN_USER_IDS,
+          ...participants.participants.map((p: any) => p.userId?.toString()).filter(Boolean),
+        ]);
+        lastAdminFetch = Date.now();
+      } catch (e: any) {
+        logger.error("Telegram", "Failed to fetch admin list", { error: e.message });
+      }
+    }
+    return cachedAdmins.has(String(senderId));
+  }
+
+  // ── Gemini suggested reply ─────────────────────────────────────────────────
+  async function generateSuggestedReply(text: string, c
+          is_complaint:     { type: "boolean" },
+          suggested_action: { type: "string" },
+          summary:          { type: "string" },
+        (async () => {
+          const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-preview-06-05" });
+          const safeText = redactPII(sanitizeForPrompt(text));
+          const prompt = `You are a professional customer support agent for Quidax, a crypto exchange based in Nigeria.
+
+A user sent this message:
+"${safeText}"
+
+Classification:
+Category: ${classification.category}
+Urgency: ${classification.urgency}
+Suggested Action: ${classification.suggested_action}
+
+Write a short, professional, empathetic reply (1-3 sentences) the support agent can send. Do not include placeholders like [Your Name].
+
+Remember: You are a Quidax support agent. Be specific to the Nigerian crypto context.`;
+
+          const result = await model.generateContent(prompt);
+          return result.response.text();
+        })(),
+        10_000,
+        "Gemini generateSuggestedReply"
+      )
+    ).catch((e: any) => {
+      logger.error("Gemini", "generateSuggestedReply failed", { error: e.message });
+      return "";
+    });
+  }
+
+  // ── Groq response schema ───────────────────────────────────────────────────
+  const GROQ_SCHEMA = {
+    type: "json_schema",
+    json_schema: {
+      name: "ticket_classification",
+      schema: {
+        type: "object",
+        properties: {
+          category:         { type: "string", description: "One of: " + VALID_CATEGORIES.join(", ") },
+          urgency:          { type: "string", description: "One of: " + VALID_URGENCIES.join(", ") },
+          product_area:     { type: "string", description: "One of: " + VALID_PRODUCT_AREAS.join(", ") },
+          sentiment:        { type: "string", description: "One of: " + VALID_SENTIMENTS.join(", ") },
+// MISSING LINE 681
+// MISSING LINE 682
+// MISSING LINE 683
+// MISSING LINE 684
+// MISSING LINE 685
+// MISSING LINE 686
+// MISSING LINE 687
+// MISSING LINE 688
+// MISSING LINE 689
+// MISSING LINE 690
+// MISSING LINE 691
+// MISSING LINE 692
+// MISSING LINE 693
+// MISSING LINE 694
+// MISSING LINE 695
+// MISSING LINE 696
+// MISSING LINE 697
+// MISSING LINE 698
+// MISSING LINE 699
+- "App Bug"           — app crash, UI error, feature broken, platform glitch
+- "Fee Complaint"     — charged wrong fee, unexpected deduction, fee dispute
+- "Network/Downtime"  — platform down, cannot connect, widespread login failure
+- "General Question"  — asking for information only, no problem reported (e.g. "what is the withdrawal limit?")
+- "Praise"            — positive feedback, compliment, no issue
+- "Spam/Irrelevant"   — greetings, off-topic, emojis only, price discussion
+
+=== URGENCY RULES (pick exactly one) ===
+- "Critical" — money stuck/lost, account hacked, funds withdrawn without consent, 3+ days without resolution
+- "High"     — active financial problem (deposit/withdrawal issue < 3 days), account locked with funds at risk
+- "Medium"   — KYC pending, app bug, trading problem, fee dispute, 1-2 day delays
+- "Low"      — general questions, praise, minor inconvenience, no financial impact
+
+=== URGENCY EXAMPLES ===
+"I have been trying to withdraw ₦250,000 since Monday" → Critical
+"My deposit hasn't reflected after 2 hours" → High
+"My KYC was rejected, I need to resubmit" → Medium
+"What are the withdrawal limits for Tier 1?" → Low
+
+=== KEY CONTEXT ===
+- ₦ = Nigerian Naira. NGN withdrawals go to Nigerian bank accounts.
+- TRC20/BEP20/ERC20 = crypto network types for USDT deposits.
+- BVN = Bank Verification Number. NIN = National Identity Number. Used for KYC in Nigeria.
+- "Processing" for >24h on a withdrawal = High urgency. >72h = Critical.
+
+Classify the user message below. Do NOT default to General Question unless the user is genuinely only asking for information.`;
+
+  // ── processAndIngestMessage ───────────────────────────────────────────────
+  let tlClient: any = null;
+
+
+  const targetGroup = process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
+
+  // T2-E: Watchdog state
+  let lastMessageReceivedAt = Date.now();
+
+  async function processAndIngestMessage(
+    text: string,
+    telegramId: number,
+    groupId: string,
+    replyToMsgId?: number,
+    msgDate?: number,
+    isAdminSender?: boolean,
+    telegramDeepLink?: string,
+    skipPreFilter?: boolean,
+    senderId?: string
+  ) {
+    const senderHash = senderId ? crypto.createHash("sha256").update(String(senderId) + groupId).digest("hex").substring(0, 16) : crypto.createHash("sha256").update(String(telegramId) + groupId).digest("hex").substring(0, 16);
+
+    logger.debug("Ingestion", "processAndIngestMessage START", { telegramId, groupId, msgDate });
+
+    if (!text || text.length < 5) {
+      throw new Error("Message too short or empty");
+    }
+
+    const supabase = getSupabase();
+    const msgDateISO = msgDate ? new Date(msgDate * 1000).toISOString() : new Date().toISOString();
+
+    // ── Handle admin replies ─────────────────────────────────────────────────
+    if (replyToMsgId) {
+      if (isAdminSender) {
+        try {
+          const { data: parentMsg } = await supabase
+            .from("messages")
+            .select("id")
+            .eq("telegram_message_id", String(replyToMsgId))
+            .single();
+
+          if (parentMsg) {
+            const { data: parentTicket } = await supabase
+              .from("tickets")
+              .select("*")
+              .eq("message_id", parentMsg.id)
+              .single();
+
+            if (parentTicket) {
+              const newRawText = parentTicket.raw_text + `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+              await supabase
+                .from("tickets")
+                .update({ raw_text: newRawText, status: "In Review" })
+                .eq("id", parentTicket.id);
+
+              logger.info("Ingestion", `Admin reply attached to ticket ${parentTicket.id}`);
+
+              // Feature 1: Learn keywords from admin reply (non-blocking)
+              extractAndLearnKeywords(supabase, text).catch(() => {});
+
+              // Insert admin reply into messages so users can reply to it later
+              try {
+                await supabase.from("messages").insert({
+                  telegram_message_id: String(telegramId),
+                  group_id: groupId,
+                  raw_text: text,
+                  message_timestamp: msgDateISO,
+                  ingested_at: new Date().toISOString(),
+                  sender_hash: senderHash,
+                });
+              } catch (e: any) {
+                logger.error("Ingestion", "Error inserting admin reply into messages", { error: e.message });
+              }
+
+              return parentTicket;
+            }
+          }
+        } catch (err: any) {
+          logger.error("Ingestion", "Error looking up parent ticket for reply", { error: err.message });
+        }
+      } else {
+        // Option B: Auto-resolve if user says thanks/resolved
+        const isResolution = /\b(thanks|thank you|resolved|fixed|worked|solved|appreciate)\b/i.test(text);
+        
+        if (isResolution) {
+          try {
+            // Check if replying to an existing message in our DB (could be user's original message or admin's reply)
+            const { data: parentMsg } = await supabase
+              .from("messages")
+              .select("id, raw_text")
+              .eq("telegram_message_id", String(replyToMsgId))
+              .maybeSingle();
+
+            let parentTicket = null;
+            if (parentMsg) {
+              const { data: pt } = await supabase
+                .from("tickets")
+                .select("*")
+                .eq("message_id", parentMsg.id)
+                .maybeSingle();
+              parentTicket = pt;
+
+              if (!parentTicket && parentMsg.raw_text) {
+                const safeText = parentMsg.raw_text.replace(/[%_]/g, '');
+                const { data: potentialTickets } = await supabase
+                  .from("tickets")
+                  .select("*")
+                  .ilike("raw_text", `%${safeText}%`)
+             
+                  
+                if (potentialTickets && potentialTickets.length > 0) {
+                  parentTicket = potentialTickets[0];
+                }
+              }
+
+              if (parentTicket && parentTicket.status !== "Resolved" && parentTicket.status !== "Dismissed") {
+                const newRawText = parentTicket.raw_text + `\n\n[USER_REPLY (Auto-Resolved)]\n${text}\n[/USER_REPLY]`;
+                await supabase
+                  .from("tickets")
+                  .update({ raw_text: newRawText, status: "Resolved" })
+                  .eq("id", parentTicket.id);
+
+                logger.info("Ingestion", `User auto-resolved ticket ${parentTicket.id}`);
+                return parentTicket;
+              }
+            }
+          } catch (err: any) {
+            logger.error("Ingestion", "Error looking up parent ticket for user resolution via reply", { error: err.message });
+          }
+        }
+        
+        logger.debug("Ingestion", `Ignoring general user reply to message ${replyToMsgId}`);
+        return null;
+      }
+    }
+
+    // ── Auto-resolve without reply ──────────────────────────────────────────
+    const isResolution = /\b(thanks|thank you|resolved|fixed|worked|solved|appreciate)\b/i.test(text);
+    if (isResolution && !isAdminSender) {
+      // Search for their most recent Open/In Review ticket
+      try {
+        const { data: recentTickets } = await supabase
+          .from("tickets")
+          .select("*")
+          .eq("sender_hash", senderHash)
+          .in("status", ["Open", "In Review"])
+          .order("created_at", { ascending: false })
+          .limit(1);
+          
+        if (recentTickets && recentTickets.length > 0) {
+          const parentTicket = recentTickets[0];
+          const newRawText = parentTicket.raw_text + `\n\n[USER_REPLY (Auto-Resolved without explicit reply)]\n${text}\n[/USER_REPLY]`;
+          await supabase
+            .from("tickets")
+            .update({ raw_text: newRawText, status: "Resolved" })
+            .eq("id", parentTicket.id);
+
+          logger.info("Ingestion", `User auto-resolved their own ticket ${parentTicket.id} without explicit reply`);
+          return parentTicket;
+        }
+      } catch (err: any) {
+        logger.error("Ingestion", "Error looking up recent ticket for user resolution", { error: err.message });
+      }
+    }
+
+
+    // ── T1-F: Pre-flight duplicate check ────────────────────────────────────
+    if (telegramId && !String(telegramId).startsWith("rand_")) {
+      const { data: existingMsg } = await supabase
+        .from("messages")
+        .select("id")
+        .eq("telegram_message_id", String(telegramId))
+        .maybeSingle();
+
+    }
+
+    // ── Feature 2: Smart pre-filter (skipped during backfill) ────────────────
+    const isPreFiltered = !skipPreFilter && !shouldProcessMessage(text, learnedKeywordCache);
+    if (isPreFiltered) {
+      logger.debug("Ingestion", "Message flagged as general chat (LLM skipped)", { preview: text.substring(0, 50) });
+    }
+
+    // ── Insert message record ────────────────────────────────────────────────
+    const { data: dbMessage, error: msgError } = await supabase
+      .from("messages")
+      .insert({
+        telegram_message_id: String(telegramId),
+        group_id: groupId,
+        raw_text: text,
+        message_timestamp: msgDateISO,
+        ingested_at: new Date().toISOString(),
+        sender_hash: senderHash,
+      })
+      .select("id")
+      .single();
+
+    if (msgError) {
+      if (msgError.code === "23505") {
+        // UNIQUE constraint violation — already exists
+        logger.debug("Ingestion", `Duplicate message detected for telegramId ${telegramId}`);
+        return null;
+      }
+      throw new Error(`DB Error inserting message: ${msgError.message}`);
+    }
+
+    // ── Insert ticket (pending state) ────────────────────────────────────────
+
+      throw new Error(`DB Error inserting ticket: ${ticketError.message}`);
+    }
+
+    // ── Async classification ─────────────────────────────────────────────────
+    (async () => {
+      try {
+        let ticketData;
+        let suggestedReply = "";
+
+        if (isPreFiltered) {
+          ticketData = {
+            summary: "General Chat",
+            category: "Other",
+            urgency: "Low",
+            product_area: "Other",
+            sentiment: "Neutral",
+            is_complaint: false,
+// MISSING LINE 951
+        // GramJS exposes edits and deletes via the low-level UpdateEditMessage
+        // and UpdateDeleteMessages update types on the Raw handler.
+    }
+
+    const { data: dbTicket, error: ticketError } = await supabase
+      .from("tickets")
+      .insert(ticketInsert)
+      .select("*")
+      .single();
+
+    if (ticketError) {
+      throw new Error(`DB Error inserting ticket: ${ticketError.message}`);
+    }
+
+    // ── Async classification ─────────────────────────────────────────────────
+    (async () => {
+      try {
+        let ticketData;
+    // ── Async classification ─────────────────────────────────────────────────
+    (async () => {
+      try {
+        let ticketData;
+        let suggestedReply = "";
+
+        if (isPreFiltered) {
+          ticketData = {
+            summary: "General Chat",
+            category: "General Question",
+            urgency: "Low",
+            product_area: "Other",
+            sentiment: "Neutral",
+            is_complaint: false,
+            suggested_action: "None",
+          };
+        } else {
+          const safeText = redactPII(sanitizeForPrompt(text));
+          const response = await groqBreaker.call(() =>
+            withTimeout(
+              openai.chat.completions.create({
+                model: "llama-3.3-70b-versatile",
+                temperature: 0,
+                messages: [
+                  { role: "system",    content: GROQ_SYSTEM_PROMPT },
+                  { role: "user",      content: safeText },
+                  { role: "assistant", content: "I will now output only the JSON classification:" },
+                ],
+                response_format: { type: "json_object" },
+              }),
+              15_000,
+              "Groq classification"
+            )
+          );
+
+          const jsonStr = response.choices[0]?.message?.content?.trim() || "{}";
+          ticketData = parseAndValidateClassification(jsonStr);  // T1-D
+          suggestedReply = await generateSuggestedReply(text, ticketData);
+        }
+
+        const needsEscalation = ticketData.urgency === "Critical";  // Only Critical auto-escalates; High stays Open for agent triage
+        const finalStatus  = isPreFiltered ? "Dismissed" : (needsEscalation ? "In Review" : "Open");
+        const finalSummary = needsEscalation ? `[ESCALATED] ${ticketData.summary}` : ticketData.summary;
+
+        await supabase
+          .from("tickets")
+          .update({
+            summary:          finalSummary,
+            category:         ticketData.category,
+            urgency:          ticketData.urgency,
+            product_area:     ticketData.product_area,
+            sentiment:        ticketData.sentiment,
+            is_complaint:     ticketData.is_complaint,
+            suggested_action: ticketData.suggested_action,
+            status:           finalStatus,
+            suggested_reply:  suggestedReply || null,
+          })
+          .eq("id", dbTicket.id);
+
+        logger.info("Classification", `Ticket ${dbTicket.id} classified`, { urgency: ticketData.urgency, category: ticketData.category });
+      } catch (bgErr: any) {
+        logger.warn("Classification", `Groq classification failed for ticket ${dbTicket.id}, attempting Gemini fallback. Error: ${bgErr.message}`);
+        try {
+          if (!genAI) throw new Error("Gemini API not configured");
+          
+          const safeText = redactPII(sanitizeForPrompt(text));
+          const response = await geminiBreaker.call(async () => {
+             const model = genAI.getGenerativeModel({
+                 model: "gemini-1.5-flash",
+                 systemInstruction: GROQ_SYSTEM_PROMPT
+            suggested_reply:  suggestedReply || null,
+          })
+          .eq("id", dbTicket.id);
+
+        logger.info("Classification", `Ticket ${dbTicket.id} classified`, { urgency: ticketData.urgency, category: ticketData.category });
+      } catch (bgErr: any) {
+        logger.warn("Classification", `Groq classification failed for ticket ${dbTicket.id}, attempting Gemini fallback. Error: ${bgErr.message}`);
+        try {
+          if (!genAI) throw new Error("Gemini API not configured");
+          
+          const safeText = redactPII(sanitizeForPrompt(text));
+          const response = await geminiBreaker.call(async () => {
+             const model = genAI.getGenerativeModel({
+                 model: "gemini-2.5-flash",
+                 systemInstruction: GROQ_SYSTEM_PROMPT
+             });
+             return withTimeout(
+                 model.generateContent({
+                     contents: [{ role: "user", parts: [{ text: safeText + "\nI will now output only the JSON classification:" }] }],
+                     generationConfig: {
+                         temperature: 0,
+                         responseMimeType: "application/json"
+                     }
+                 }),
+                 15_000,
+                 "Gemini classification"
+             );
+          });
+          
+          const jsonStr = response.response.text().trim() || "{}";
+          const ticketData = parseAndValidateClassification(jsonStr);
+          const suggestedReply = await generateSuggestedReply(text, ticketData);
+          
+          const needsEscalation = ticketData.urgency === "Critical";
+          const finalStatus  = needsEscalation ? "In Review" : "Open";
+          const finalSummary = needsEscalation ? `[ESCALATED] ${ticketData.summary}` : ticketData.summary;
+
+          await supabase
+            .from("tickets")
+            .update({
+              summary:          finalSummary,
+              category:         ticketData.category,
+              urgency:          ticketData.urgency,
+              product_area:     ticketData.product_area,
+              sentiment:        ticketData.sentiment,
+              is_complaint:     ticketData.is_complaint,
+              suggested_action: ticketData.suggested_action,
+              status:           finalStatus,
+              suggested_reply:  suggestedReply || null,
+            })
+            .eq("id", dbTicket.id);
+            
+          logger.info("Classification", `Ticket ${dbTicket.id} classified via Gemini Fallback`, { urgency: ticketData.urgency, category: ticketData.category });
+
+        } catch (geminiErr: any) {
+          logger.error("Classification", `Background classification (Gemini Fallback) failed for ticket ${dbTicket.id}`, { error: geminiErr.message });
+          await supabase
+            .from("tickets")
+            .update({ status: "Open", summary: "Classification failed — manual review needed." })
+            .eq("id", dbTicket.id);
+        }
+      const { StringSession } = await import("telegram/sessions/index.js");
+      const { NewMessage } = await import("telegram/events/index.js");
+
+      const stringSession = new StringSession(tlSession);
+      const client = new TelegramClient(stringSession, tlApiId, tlApiHash, { connectionRetries: 5 });
+      tlClient = client;
+
+      try {
+        await client.connect();
+        logger.info("Telegram", "✅ Connected to Telegram using session string");
+
+        // Seed keyword cache on startup
+        refreshLearnedKeywords(getSupabase()).catch(() => {});
+        setInterval(() => refreshLearnedKeywords(getSupabase()), 10 * 60 * 1000);
+
+        // ── Auto-Fetch (catch-up cron) ─────────────────────────────────────
+        const runAutoFetch = async () => {
+          try {
+            logger.info("AutoFetch", `Periodic check for missed messages in ${targetGroup}`);
+            const messages = await client.getMessages(targetGroup, { limit: 20 });
+            const cutoffDate = Math.floor(Date.now() / 1000) - 2 * 60 * 60;
+
+            for (const msg of messages) {
+              if (!msg || !msg.text) continue;
+              if (msg.date < cutoffDate) continue;
+              try {
+                const id = msg.id || Math.floor(Math.random() * 10_000_000);
+   
+          // Handle edited messages
+          if (update.className === "UpdateEditMessage" || update.className === "UpdateEditChannelMessage") {
+            const msg = update.message;
+            if (!msg || !msg.id || !msg.message) return;
+            try {
+              const supabase = getSupabase();
+              await supabase
+                .from("messages")
+                .update({ raw_text: msg.message, edited_at: new Date().toISOString() })
+                .eq("telegram_message_id", String(msg.id));
+              logger.info("Telegram", `Message ${msg.id} edited — updated in DB`);
+            } catch (e: any) {
+              logger.warn("Telegram", "Edit handler error", { error: e.message });
+            }
+          }
+
+          // Handle deleted messages
+          if (update.className === "UpdateDeleteMessages" || update.className === "UpdateDeleteChannelMessages") {
+            const deletedIds: number[] = update.messages || [];
+            if (!deletedIds.length) return;
+            try {
+              const supabase = getSupabase();
+              }
+            } catch (e: any) {
+              logger.error("Watchdog", "Failed to reconnect", { error: e.message });
+            }
+          }
+
+          // Heartbeat ping
+          if (process.env.HEARTBEAT_URL) {
+            fetch(process.env.HEARTBEAT_URL).catch(() => {});
+          }
+        }, 5 * 60 * 1000);
+
+      } catch (err: any) {
+        logger.error("Telegram", "❌ Failed to connect Telegram Client", { error: err.message });
+      }
+    }).catch((e: any) => {
+      logger.warn("Telegram", "GramJS package failed to load", { error: e.message });
+    });
+  } else {
+    logger.warn("Telegram", "Listener not started — missing TELEGRAM_API_ID, TELEGRAM_API_HASH, or TELEGRAM_SESSION_STRING");
+    // Still seed keyword cache
+    try { refreshLearnedKeywords(getSupabase()).catch(() => {}); } catch { /* no supabase yet */ }
+  }
+
+  // ── PUBLIC: security.txt (T4-A) ──────────────────────────────────────────
+  app.get("/.well-known/security.txt", (_req, res) => {
+    res.type("text/plain").send(
+      `Contact: mailto:security@quidax.com\nPreferred-Languages: en\nExpires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()}\n`
+    );
+  });
+
+  // ── PUBLIC: health check ─────────────────────────────────────────────────
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      circuits: [groqBreaker.getStatus(), geminiBreaker.getStatus(), supabaseBreaker.getStatus()],
+      telegramConnected: !!tlClient,
+      lastMessageReceivedAt: new Date(lastMessageReceivedAt).toISOString(),
+    });
+  });
+
+  // ── T1-B: Login endpoint ─────────────────────────────────────────────────
+  app.post("/api/auth/login", authLimiter, (req, res) => {
+    const { password } = req.body || {};
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ error: "password is required" });
+    }
+
+    if (timingSafeStringCompare(password, DASHBOARD_PASSWORD)) {
+  }
+
+  // ── PUBLIC: security.txt (T4-A) ──────────────────────────────────────────
+  app.get("/.well-known/security.txt", (_req, res) => {
+    res.type("text/plain").send(
+      `Contact: mailto:security@quidax.com\nPreferred-Languages: en\nExpires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()}\n`
+    );
+  });
+
+  // ── PUBLIC: health check ─────────────────────────────────────────────────
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      circuits: [groqBreaker.getStatus(), geminiBreaker.getStatus(), supabaseBreaker.getStatus()],
+      telegramConnected: !!tlClient,
+      lastMessageReceivedAt: new Date(lastMessageReceivedAt).toISOString(),
+    });
+  });
+
+  // ── T1-B: Login endpoint ─────────────────────────────────────────────────
+  app.post("/api/auth/login", authLimiter, (req, res) => {
+    const { password } = req.body || {};
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ error: "password is required" });
+    }
+
+    if (timingSafeStringCompare(password, DASHBOARD_PASSWORD)) {
+      const token = generateTok
+  // ── Protected: logout ─────────────────────────────────────────────────────
+  app.post("/api/auth/logout", requireAuth, (req, res) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+      });
+      return res.json({ role: "super_admin", token });
+    }
+
+    if (process.env.SUPPORT_API_KEY && timingSafeStringCompare(password, process.env.SUPPORT_API_KEY)) {
+      const token = generateToken();
+      const TTL_MS = 8 * 60 * 60 * 1000;
+      activeTokens.set(token, {
+        role: "support", tenantId: SUPPORT_GROUP_ID, userId: "support_user_1",
+        expiresAt: Date.now() + TTL_MS,
+      });
+      return res.json({ role: "support", token });
+    }
+
+    logger.warn("Auth", "Failed login attempt", { ip: req.ip });
+    return res.status(401).json({ error: "Invalid password" });
+  });
+
+  // ── Protected: verify ─────────────────────────────────────────────────────
+  app.get("/api/auth/verify", requireAuth, (req, res) => {
+    res.json({ success: true, role: (req as any).user.role });
+  });
+
+  // ── Protected: logout ─────────────────────────────────────────────────────
+  app.post("/api/auth/logout", requireAuth, (req, res) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (token) activeTokens.delete(token);
+    res.json({ success: true });
+  });
+
+  // ── Protected: communities ────────────────────────────────────────────────
+  app.get("/api/communities", requireAuth, async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase.from("communities").select("*");
+      if (error) throw error;
+      res.json(data);
+    } catch (e: any) {
+      logger.error("API", `GET /api/communities error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
+
+  // ── Protected: tickets (T2-D server-side pagination + filtering) ──────────
+  app.get("/api/tickets", requireAuth, async (req, res) => {
+    // Demo mode (Feature 5)
+    if (process.env.DEMO_MODE === "true") {
+      const page     = Math.max(0, parseInt(req.query.page as string || "0"));
+      const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize as string || "50")));
+      let demo = [...DEMO_TICKETS];
+      // Issues-only: exclude non-essential categories AND Low urgency (same logic as live path)
+      if (req.query.issues_only === "true") {
+        demo = demo.filter(t => !NON_ESSENTIAL_CATEGORIES.has(t.category) && t.urgency !== "Low");
+      }
+      if (req.query.urgency && req.query.urgency !== "All") {
+        demo = demo.filter(t => t.urgency === req.query.urgency);
+      }
+      const total = demo.length;
+      const tickets = demo.slice(page * pageSize, (page + 1) * pageSize);
+      return res.json({ tickets, total, page, pageSize });
+    }
+
+    try {
+      const supabase = getSupabase();
+      const user     = (req as any).user;
+
+      // Parse pagination params
+      const supabase = getSupabase();
+      const user     = (req as any).user;
+
+      // Parse pagination params
+      const page     = Math.max(0, parseInt(req.query.page as string || "0"));
+      const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize as string || "50")));
+      const from     = page * pageSize;
+      const to       = from + pageSize - 1;
+
+      let query = supabase
+        .from("tickets")
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false })
+        .range(from, to);
+
+      // T1-G: Tenant isolation
+      if (user.role === "support") {
+        query = query.eq("group_id", user.tenantId);
+      } else if (req.query.group_id) {
+        query = query.eq("group_id", req.query.group_id as string);
+      }
+
+      // Server-side filters
+      if (req.query.urgency && req.query.urgency !== "All") {
+        query = query.eq("urgency", req.query.urgency as string);
+      }
+      if (req.query.status && req.query.status !== "All") {
+        query = query.eq("status", req.query.status as string);
+      }
+      if (req.query.category && req.query.category !== "All") {
+    } catch (e: any) {
+      logger.error("API", `GET /api/communities error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
+
+  // ── Protected: tickets (T2-D server-side pagination + filtering) ──────────
+  app.get("/api/tickets", requireAuth, async (req, res) => {
+    // Demo mode (Feature 5)
+    if (process.env.DEMO_MODE === "true") {
+      const page     = Math.max(0, parseInt(req.query.page as string || "0"));
+      const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize as string || "50")));
+      let demo = [...DEMO_TICKETS];
+      // Issues-only: exclude non-essential categories AND Low urgency (same logic as live path)
+      if (req.query.issues_only === "true") {
+        demo = demo.filter(t => !NON_ESSENTIAL_CATEGORIES.has(t.category) && t.urgency !== "Low");
+      }
+      if (req.query.urgency && req.query.urgency !== "All") {
+        demo = demo.filter(t => t.urgency === req.query.urgency);
+      }
+      const total = demo.length;
+      const tickets = demo.slice(page * pageSize, (page + 1) * pageSize);
+      return res.json({ tickets, total, page, pageSize });
+    }
+
+    try {
+      const supabase = getSupabase();
+      const user     = (req as any).user;
+
+      // Parse pagination params
+      const page     = Math.max(0, parseInt(req.query.page as string || "0"));
+      const from     = page * pageSize;
+      const to       = from + pageSize - 1;
+
+      let query = supabase
+        .from("tickets")
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false })
+        .range(from, to);
+
+      let statsQuery = supabase
+        .from("tickets")
+        .select("id, status, urgency, created_at");
+
+      // Base filters apply to BOTH stats and the table list
+      const applyBaseFilters = (q: any) => {
+        let temp = q;
+        if (user.role === "support") {
+          temp = temp.eq("group_id", user.tenantId);
+        } else if (req.query.group_id) {
+          temp = temp.eq("group_id", req.query.group_id as string);
+        }
+
+        if (req.query.issues_only === "true") {
+          const nonEssStr = NON_ESSENTIAL_CATEGORIES.map(c => `"${c}"`).join(",");
+          temp = temp.or(`summary.eq."Processing message...",and(urgency.neq.Low,category.not.in.(${nonEssStr}))`);
+        }
+
+        if (req.query.days && req.query.days !== "All" && req.query.days !== "Custom") {
+          const days = parseInt(req.query.days as string);
+          if (!isNaN(days)) {
+             const d = new Date();
+             d.setDate(d.getDate() - (days - 1));
+             d.setHours(0,0,0,0);
+             temp = temp.gte("created_at", d.toISOString());
+          }
+        }
+        if (req.query.days === "Custom") {
+          if (req.query.startDate) temp = temp.gte("created_at", req.query.startDate as string);
+          if (req.query.endDate) temp = temp.lte("created_at", req.query.endDate as string);
+        }
+        if (req.query.search) {
+          temp = temp
+        if (req.query.search) {
+          temp = temp.or(`summary.ilike.%${req.query.search}%,category.ilike.%${req.query.search}%,raw_text.ilike.%${req.query.search}%`);
+        }
+
+        return temp;
+      };
+
+      // Table-specific filters ONLY apply to the list query, not the global stats
+          if (req.query.startDate) temp = temp.gte("created_at", req.query.startDate as string);
+          if (req.query.endDate) temp = temp.lte("created_at", req.query.endDate as string);
+        }
+        if (req.query.search) {
+          temp = temp.or(`summary.ilike.%${req.query.search}%,category.ilike.%${req.query.search}%,raw_text.ilike.%${req.query.search}%`);
+        }
+
+        return temp;
+        }
+        return temp;
+      };
+
+      query = applyTableFilters(applyBaseFilters(query));
+      statsQuery = applyBaseFilters(statsQuery);
+
+      const [ { data, error, count }, { data: statsData, error: statsError } ] = await Promise.all([
+        query,
+        statsQuery
+      ]);
+
+      if (error) throw error;
+      if (statsError) throw statsError;
+
+      const now = new Date();
+      const isToday = (d: Date) => d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+
+      const allData = statsData || [];
+      const resolved = allData.filter(t => t.status === "Resolved");
+      const openOrReview = allData.filter(t => t.status === "Open" || t.status === "In Review");
+      
+      const stats = {
+        openCount: allData.filter(t => t.status === "Open").length,
+        resolvedCount: resolved.length,
+        criticalCount: allData.filter(t => t.urgency === "Critical" && t.status !== "Resolved" && t.status !== "Dismissed").length,
+        highCount: allData.filter(t => t.urgency === "High" && t.status !== "Resolved" && t.status !== "Dismissed").length,
+        mediumCount: allData.filter(t => t.urgency === "Medium" && t.status !== "Resolved" && t.status !== "Dismissed").length,
+        lowCount: allData.filter(t => t.urgency === "Low" && t.status !== "Resolved" && t.status !== "Dismissed").length,
+        ticketsTodayCount: allData.filter(t => isToday(new Date(t.created_at))).length,
+        totalCount: count ?? 0,
+        resolutionRate: allData.length > 0 ? Math.round((resolved.length / allData.length) * 100) : 0,
+      overallAccuracy:  Math.round((correct          / total) * 100),
+      results,
+    });
+  });
+
+  // ── Protected: backfill ───────────────────────────────────────────────────
+  app.post("/api/backfill", heavyLimiter, requireAuth, async (req, res) => {
+    try {
+      const user = (req as any).user;
+  let backfillProgress: { running: boolean; total: number; done: number; ingested: number; skipped: number; startedAt: number | null } = {
+    running: false, total: 0, done: 0, ingested: 0, skipped: 0, startedAt: null,
+  };
+
+  app.get("/api/backfill/progress", requireAuth, (_req, res) => {
+    res.json(backfillProgress);
+  });
+
+  // ── Protected: backfill ───────────────────────────────────────────────────
+  app.post("/api/backfill", heavyLimiter, requireAuth, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      if (user.role !== "super_admin") {
+        return res.status(403).json({ error: "Forbidden: insufficient permissions" });
+      }
+      if (!tlClient) {
+        return res.status(400).json({ error: "Telegram client not connected." });
+      }
+      if (backfillProgress.running) {
+        return res.status(409).json({ error: `Backfill already running: ${backfillProgress.done}/${backfillProgress.total} done` });
+      }
+
+      let limit = Math.min(500, Number(req.body.limit) || 20);
+      const days = Number(req.body.days) || 0;
+
+      logger.info("Backfill", `Fetching up to ${limit} messages from ${targetGroup}`);
+      const messages = await tlClient.getMessages(targetGroup, { limit });
+      const cutoffDate = days ? Math.floor(Date.now() / 1000) - days * 24 * 60 * 60 : 0;
+
+      const validMessages = messages.filter((msg: any) => {
+        if (!msg?.text) return false;
+        if (cutoffDate && msg.date < cutoffDate) return false;
+        return true;
+      });
+
+      // Initialise progress
+      backfillProgress = { running: true, total: validMessages.length, done: 0, ingested: 0, skipped: 0, startedAt: Date.now() };
+
+      res.status(200).json({
+        success: true,
+        message: `Backfill started — processing ${validMessages.length} messages in background`,
+        }
+        logger.info("Backfill", `Background processing of ${validMessages.length} messages finished`);
+      })();
+    } catch (e: any) {
+      });
+
+      (async () => {
+        const adminCache = new Map<string, boolean>();
+        for (const msg of validMessages) {
+          try {
+            const id = msg.id || Math.floor(Math.random() * 10_000_000);
+            const replyToMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
+            const senderId = String(msg.senderId ?? "unknown");
+            // Cache admin status per sender so we don't hammer Telegram API on every message
+            let admin = adminCache.get(senderId);
+            if (admin === undefined) {
+              admin = await checkIsAdmin(targetGroup, msg.senderId).catch(() => false);
+              adminCache.set(senderId, admin);
+            }
+            const deepLink = buildTelegramDeepLink(targetGroup, id);
+            const ticket = await processAndIngestMessage(String(msg.text).trim(), id, targetGroup, replyToMsgId, msg.date, admin, deepLink, true /* skipPreFilter */);
+            if (ticket) backfillProgress.ingested++;
+            else backfillProgress.skipped++;
+          } catch (e: any) {
+            logger.warn("Backfill", `Error on msg ${msg.id}`, { error: e.message });
+            backfillProgress.skipped++;
+          }
+          backfillProgress.done++;
+          await new Promise(r => setTimeout(r, 1000)); // 1s delay — Groq free tier ~30 req/min
+        }
+        backfillProgress.running = false;
+        logger.info("Backfill", `Finished: ${backfillProgress.ingested} ingested, ${backfillProgress.skipped} skipped`);
+      })();
+    } catch (e: any) {
+      backfillProgress.running = false;
+      logger.error("API", `POST /api/backfill error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
+
+  // Reliable approach: check if dist/index.html exists instead of relying on
+  // NODE_ENV which dotenv may not override correctly in all environments.
+  const distIndexPath = path.join(process.cwd(), "dist", "index.html");
+  const isBuilt = fs.existsSync(distIndexPath);
+
+  if (isBuilt) {
+    // Serve the pre-built Vite output (production / npm start)
+    const distPath = path.join(process.cwd(), "dist");
+    // Serve assets folder explicitly
+    app.use("/assets", express.static(path.join(distPath, "assets")));
+    // Serve any other static files that land in dist root (favicon etc)
+    app.use(express.static(distPath));
+    // Final catch-all — app.use with NO path always matches everything,
+    // including bare "/" which app.get("*") misses in Express 4.21+
+    app.use((_req: express.Request, res: express.Response) => {
+      res.sendFile(distIndexPath);
+    });
+    logger.info("Server", `Serving built frontend from ${distPath}`);
+  } else {
+    // Dev mode — use Vite middleware for HMR (npm run dev / tsx server.ts)
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "custom",
+    });
+    app.use(vite.middlewares);
+  app.post("/api/backfill", heavyLimiter, requireAuth, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      if (user.role !== "super_admin") {
+        return res.status(403).json({ error: "Forbidden: insufficient permissions" });
+      }
+      if (!tlClient) {
+        return res.status(400).json({ error: "Telegram client not connected." });
+      }
+      if (backfillProgress.running) {
+        return res.status(409).json({ error: `Backfill already running: ${backfillProgress.done}/${backfillProgress.total} done` });
+      }
+
+        jira_issue_url: jiraUrl,
+      }).eq("id", ticketId);
+
+      logAuditAction(supabase, user.userId, "CREATE_JIRA_ISSUE", `ticket:${ticketId}`, null, { jira_issue_key: jiraData.key }, req.ip || "unknown");
+
+      return res.json({ success: true, jira_issue_key: jiraData.key, jira_issue_url: jiraUrl });
+    } catch (e: any) {
+      logger.error("API", `POST /api/tickets/:id/jira error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
+
+  // ── Accuracy Benchmark ──────────────────────────────────────────────────
+  app.get("/api/eval", requireAuth, async (_req, res) => {
+    // 20 gold-standard labelled messages — labels are consistent with GROQ_SYSTEM_PROMPT rules
+    const GOLD_MESSAGES = [
+      { text: "Admin, I deposited 50k NGN yesterday and it's not in my wallet",               expectedCategory: "Deposit Issue",      expectedUrgency: "High"     },
+      { text: "My withdrawal has been pending for 3 days, please help",                       expectedCategory: "Withdrawal Issue",   expectedUrgency: "Critical"  }, // 3+ days = Critical
+      { text: "I cannot login to my account, it says invalid credentials",                    expectedCategory: "Account Access",     expectedUrgency: "High"     },
+      { text: "My KYC verification has been rejected twice, I uploaded my NIN",               expectedCategory: "KYC/Verification",   expectedUrgency: "Medium"   },
+      { text: "The app keeps crashing when I try to trade BTC/NGN",                          expectedCategory: "App Bug",            expectedUrgency: "Medium"   },
+      try {
+        const template = fs.readFileSync(
+          path.resolve(process.cwd(), "index.html"),
+          "utf-8"
+        );
+        const html = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).set({ "Content-Type": "text/html" }).end(html);
+      } catch (e: any) {
+        vite.ssrFixStacktrace(e);
+        next(e);
+      }
+    });
+    logger.info("Server", "Serving via Vite dev middleware (no dist/ found)");
+  }
+
+  // ── Catch-all for unknown API routes ──────────────────────────────────────
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ error: `API route not found: ${req.method} ${req.originalUrl}` });
+  });
+
+  // ── T3-F: Global error handler ────────────────────────────────────────────
+              const ticket = await processAndIngestMessage(String(msg.text).trim(), id, targetGroup, replyToMsgId, msg.date, admin, deepLink, true);
+              if (ticket) backfillProgress.ingested++;
+              else backfillProgress.skipped++;
+              delay = Math.max(2100, delay * 0.9); // gradually recover to base delay after success
+              break; // success — move to next message
+            } catch (e: any) {
+              const msg_text = e.message || "";
+              // Groq 429 rate limit — respect Retry-After or double the delay
+              if (msg_text.includes("429") || msg_text.toLowerCase().includes("rate limit")) {
+                const retryAfterMatch = msg_text.match(/retry.after[:\s]+(\d+)/i);
+                const waitMs = retryAfterMatch ? parseInt(retryAfterMatch[1]) * 1000 : delay * 2;
+                delay = Math.min(waitMs, 60_000); // cap at 60s
+                logger.warn("Backfill", `Rate limited — waiting ${Math.round(delay / 1000)}s`, { retry: retries });
+                await new Promise(r => setTimeout(r, delay));
+                retries++;
+              } else {
+                // Non-rate-limit error — skip this message
+                logger.warn("Backfill", `Error on msg ${msg.id}`, { error: e.message });
+                backfillProgress.skipped++;
+                break;
+              }
+            }
+          }
+          if (retries >= 3) {
+            logger.warn("Backfill", `Giving up on msg ${msg.id} after 3 rate-limit retries`);
+            backfillProgress.skipped++;
+          }
+          backfillProgress.done++;
+          await new Promise(r => setTimeout(r, delay));
+        }
+// MISSING LINE 1651
+// MISSING LINE 1652
+// MISSING LINE 1653
+// MISSING LINE 1654
+// MISSING LINE 1655
+// MISSING LINE 1656
+// MISSING LINE 1657
+// MISSING LINE 1658
+// MISSING LINE 1659
+// MISSING LINE 1660
+// MISSING LINE 1661
+// MISSING LINE 1662
+// MISSING LINE 1663
+// MISSING LINE 1664
+// MISSING LINE 1665
+// MISSING LINE 1666
+// MISSING LINE 1667
+// MISSING LINE 1668
+// MISSING LINE 1669
+// MISSING LINE 1670
+// MISSING LINE 1671
+// MISSING LINE 1672
+// MISSING LINE 1673
+// MISSING LINE 1674
+// MISSING LINE 1675
+// MISSING LINE 1676
+// MISSING LINE 1677
+// MISSING LINE 1678
+// MISSING LINE 1679
+// MISSING LINE 1680
+// MISSING LINE 1681
+// MISSING LINE 1682
+// MISSING LINE 1683
+// MISSING LINE 1684
+// MISSING LINE 1685
+// MISSING LINE 1686
+// MISSING LINE 1687
+// MISSING LINE 1688
+// MISSING LINE 1689
+// MISSING LINE 1690
+// MISSING LINE 1691
+// MISSING LINE 1692
+// MISSING LINE 1693
+// MISSING LINE 1694
+// MISSING LINE 1695
+// MISSING LINE 1696
+// MISSING LINE 1697
+// MISSING LINE 1698
+// MISSING LINE 1699
+// MISSING LINE 1700
+// MISSING LINE 1701
+// MISSING LINE 1702
+// MISSING LINE 1703
+// MISSING LINE 1704
+// MISSING LINE 1705
+// MISSING LINE 1706
+// MISSING LINE 1707
+// MISSING LINE 1708
+// MISSING LINE 1709
+// MISSING LINE 1710
+// MISSING LINE 1711
+// MISSING LINE 1712
+// MISSING LINE 1713
+// MISSING LINE 1714
+// MISSING LINE 1715
+// MISSING LINE 1716
+// MISSING LINE 1717
+// MISSING LINE 1718
+// MISSING LINE 1719
+// MISSING LINE 1720
+// MISSING LINE 1721
+// MISSING LINE 1722
+// MISSING LINE 1723
+// MISSING LINE 1724
+// MISSING LINE 1725
+// MISSING LINE 1726
+// MISSING LINE 1727
+// MISSING LINE 1728
+// MISSING LINE 1729
+// MISSING LINE 1730
+// MISSING LINE 1731
+// MISSING LINE 1732
+// MISSING LINE 1733
+// MISSING LINE 1734
+// MISSING LINE 1735
+// MISSING LINE 1736
+// MISSING LINE 1737
+// MISSING LINE 1738
+// MISSING LINE 1739
+// MISSING LINE 1740
+// MISSING LINE 1741
+// MISSING LINE 1742
+// MISSING LINE 1743
+// MISSING LINE 1744
+// MISSING LINE 1745
+// MISSING LINE 1746
+// MISSING LINE 1747
+// MISSING LINE 1748
+// MISSING LINE 1749
+// MISSING LINE 1750
+// MISSING LINE 1751
+// MISSING LINE 1752
+// MISSING LINE 1753
+// MISSING LINE 1754
+// MISSING LINE 1755
+// MISSING LINE 1756
+// MISSING LINE 1757
+// MISSING LINE 1758
+// MISSING LINE 1759
+// MISSING LINE 1760
+// MISSING LINE 1761
+// MISSING LINE 1762
+// MISSING LINE 1763
+// MISSING LINE 1764
+// MISSING LINE 1765
+// MISSING LINE 1766
+// MISSING LINE 1767
+// MISSING LINE 1768
+// MISSING LINE 1769
+// MISSING LINE 1770
+// MISSING LINE 1771
+// MISSING LINE 1772
+// MISSING LINE 1773
+// MISSING LINE 1774
+// MISSING LINE 1775
+// MISSING LINE 1776
+// MISSING LINE 1777
+// MISSING LINE 1778
+// MISSING LINE 1779
+// MISSING LINE 1780
+// MISSING LINE 1781
+// MISSING LINE 1782
+// MISSING LINE 1783
+// MISSING LINE 1784
+// MISSING LINE 1785
+// MISSING LINE 1786
+// MISSING LINE 1787
+// MISSING LINE 1788
+// MISSING LINE 1789
+// MISSING LINE 1790
+// MISSING LINE 1791
+// MISSING LINE 1792
+// MISSING LINE 1793
+// MISSING LINE 1794
+// MISSING LINE 1795
+// MISSING LINE 1796
+// MISSING LINE 1797
+// MISSING LINE 1798
+// MISSING LINE 1799
+// MISSING LINE 1800
+// MISSING LINE 1801
+// MISSING LINE 1802
+// MISSING LINE 1803
+// MISSING LINE 1804
+// MISSING LINE 1805
+// MISSING LINE 1806
+// MISSING LINE 1807
+// MISSING LINE 1808
+// MISSING LINE 1809
+// MISSING LINE 1810
+// MISSING LINE 1811
+// MISSING LINE 1812
+// MISSING LINE 1813
+// MISSING LINE 1814
+// MISSING LINE 1815
+// MISSING LINE 1816
+// MISSING LINE 1817
+// MISSING LINE 1818
+// MISSING LINE 1819
+// MISSING LINE 1820
+// MISSING LINE 1821
+// MISSING LINE 1822
+// MISSING LINE 1823
+// MISSING LINE 1824
+// MISSING LINE 1825
+// MISSING LINE 1826
+// MISSING LINE 1827
+// MISSING LINE 1828
+// MISSING LINE 1829
+// MISSING LINE 1830
+// MISSING LINE 1831
+// MISSING LINE 1832
+// MISSING LINE 1833
+// MISSING LINE 1834
+// MISSING LINE 1835
+// MISSING LINE 1836
+// MISSING LINE 1837
+// MISSING LINE 1838
+// MISSING LINE 1839
+// MISSING LINE 1840
+// MISSING LINE 1841
+// MISSING LINE 1842
+// MISSING LINE 1843
+// MISSING LINE 1844
+// MISSING LINE 1845
+// MISSING LINE 1846
+// MISSING LINE 1847
+// MISSING LINE 1848
+// MISSING LINE 1849
+// MISSING LINE 1850
+// MISSING LINE 1851
+// MISSING LINE 1852
+// MISSING LINE 1853
+// MISSING LINE 1854
+// MISSING LINE 1855
+// MISSING LINE 1856
+// MISSING LINE 1857
+// MISSING LINE 1858
+// MISSING LINE 1859
+// MISSING LINE 1860
+// MISSING LINE 1861
+// MISSING LINE 1862
+// MISSING LINE 1863
+// MISSING LINE 1864
+// MISSING LINE 1865
+// MISSING LINE 1866
+// MISSING LINE 1867
+// MISSING LINE 1868
+// MISSING LINE 1869
+// MISSING LINE 1870
+// MISSING LINE 1871
+// MISSING LINE 1872
+// MISSING LINE 1873
+// MISSING LINE 1874
+// MISSING LINE 1875
+// MISSING LINE 1876
+// MISSING LINE 1877
+// MISSING LINE 1878
+// MISSING LINE 1879
+// MISSING LINE 1880
+// MISSING LINE 1881
+// MISSING LINE 1882
+// MISSING LINE 1883
+// MISSING LINE 1884
+// MISSING LINE 1885
+// MISSING LINE 1886
+// MISSING LINE 1887
+// MISSING LINE 1888
+// MISSING LINE 1889
+// MISSING LINE 1890
+// MISSING LINE 1891
+// MISSING LINE 1892
+// MISSING LINE 1893
+// MISSING LINE 1894
+// MISSING LINE 1895
+// MISSING LINE 1896
+// MISSING LINE 1897
+// MISSING LINE 1898
+// MISSING LINE 1899
+// MISSING LINE 1900
+// MISSING LINE 1901
+// MISSING LINE 1902
+// MISSING LINE 1903
+// MISSING LINE 1904
+// MISSING LINE 1905
+// MISSING LINE 1906
+// MISSING LINE 1907
+// MISSING LINE 1908
+// MISSING LINE 1909
+// MISSING LINE 1910
+// MISSING LINE 1911
+// MISSING LINE 1912
+// MISSING LINE 1913
+// MISSING LINE 1914
+// MISSING LINE 1915
+// MISSING LINE 1916
+// MISSING LINE 1917
+// MISSING LINE 1918
+// MISSING LINE 1919
+// MISSING LINE 1920
+// MISSING LINE 1921
+// MISSING LINE 1922
+// MISSING LINE 1923
+// MISSING LINE 1924
+// MISSING LINE 1925
+// MISSING LINE 1926
+// MISSING LINE 1927
+// MISSING LINE 1928
+// MISSING LINE 1929
+// MISSING LINE 1930
+// MISSING LINE 1931
+// MISSING LINE 1932
+// MISSING LINE 1933
+// MISSING LINE 1934
+// MISSING LINE 1935
+// MISSING LINE 1936
+// MISSING LINE 1937
+// MISSING LINE 1938
+// MISSING LINE 1939
+// MISSING LINE 1940
+// MISSING LINE 1941
+// MISSING LINE 1942
+// MISSING LINE 1943
+// MISSING LINE 1944
+// MISSING LINE 1945
+// MISSING LINE 1946
+// MISSING LINE 1947
+// MISSING LINE 1948
+// MISSING LINE 1949
+// MISSING LINE 1950
+// MISSING LINE 1951
+// MISSING LINE 1952
+// MISSING LINE 1953
+// MISSING LINE 1954
+// MISSING LINE 1955
+// MISSING LINE 1956
+// MISSING LINE 1957
+// MISSING LINE 1958
+// MISSING LINE 1959
+// MISSING LINE 1960
+// MISSING LINE 1961
+// MISSING LINE 1962
+// MISSING LINE 1963
+// MISSING LINE 1964
+// MISSING LINE 1965
+// MISSING LINE 1966
+// MISSING LINE 1967
+// MISSING LINE 1968
+// MISSING LINE 1969
+// MISSING LINE 1970
+// MISSING LINE 1971
+// MISSING LINE 1972
+// MISSING LINE 1973
+// MISSING LINE 1974
+// MISSING LINE 1975
+// MISSING LINE 1976
+// MISSING LINE 1977
+// MISSING LINE 1978
+// MISSING LINE 1979
+// MISSING LINE 1980
+// MISSING LINE 1981
+// MISSING LINE 1982
+// MISSING LINE 1983
+// MISSING LINE 1984
+// MISSING LINE 1985
+// MISSING LINE 1986
+// MISSING LINE 1987
+// MISSING LINE 1988
+// MISSING LINE 1989
+// MISSING LINE 1990
+// MISSING LINE 1991
+// MISSING LINE 1992
+// MISSING LINE 1993
+// MISSING LINE 1994
+// MISSING LINE 1995
+// MISSING LINE 1996
+// MISSING LINE 1997
+// MISSING LINE 1998
+// MISSING LINE 1999
+// MISSING LINE 2000
+// MISSING LINE 2001
+// MISSING LINE 2002
+// MISSING LINE 2003
+// MISSING LINE 2004
+// MISSING LINE 2005
+// MISSING LINE 2006
+// MISSING LINE 2007
+// MISSING LINE 2008
+// MISSING LINE 2009
+// MISSING LINE 2010
+// MISSING LINE 2011
+// MISSING LINE 2012
+// MISSING LINE 2013
+// MISSING LINE 2014
+// MISSING LINE 2015
+// MISSING LINE 2016
+// MISSING LINE 2017
+// MISSING LINE 2018
+// MISSING LINE 2019
+// MISSING LINE 2020
+// MISSING LINE 2021
+// MISSING LINE 2022
+// MISSING LINE 2023
+// MISSING LINE 2024
+// MISSING LINE 2025
+// MISSING LINE 2026
+// MISSING LINE 2027
+// MISSING LINE 2028
+// MISSING LINE 2029
+// MISSING LINE 2030
+// MISSING LINE 2031
+// MISSING LINE 2032
+// MISSING LINE 2033
+// MISSING LINE 2034
+// MISSING LINE 2035
+// MISSING LINE 2036
+// MISSING LINE 2037
+// MISSING LINE 2038
+// MISSING LINE 2039
+// MISSING LINE 2040
+// MISSING LINE 2041
+// MISSING LINE 2042
+// MISSING LINE 2043
+// MISSING LINE 2044
+// MISSING LINE 2045
+// MISSING LINE 2046
+// MISSING LINE 2047
+// MISSING LINE 2048
+// MISSING LINE 2049
+// MISSING LINE 2050
+// MISSING LINE 2051
+// MISSING LINE 2052
+// MISSING LINE 2053
+// MISSING LINE 2054
+// MISSING LINE 2055
+// MISSING LINE 2056
+// MISSING LINE 2057
+// MISSING LINE 2058
+// MISSING LINE 2059
+// MISSING LINE 2060
+// MISSING LINE 2061
+// MISSING LINE 2062
+// MISSING LINE 2063
+// MISSING LINE 2064
+// MISSING LINE 2065
+// MISSING LINE 2066
+// MISSING LINE 2067
+// MISSING LINE 2068
+// MISSING LINE 2069
+// MISSING LINE 2070
+// MISSING LINE 2071
+// MISSING LINE 2072
+// MISSING LINE 2073
+// MISSING LINE 2074
+// MISSING LINE 2075
+// MISSING LINE 2076
+// MISSING LINE 2077
+// MISSING LINE 2078
+// MISSING LINE 2079
+// MISSING LINE 2080
+// MISSING LINE 2081
+// MISSING LINE 2082
+// MISSING LINE 2083
+// MISSING LINE 2084
+// MISSING LINE 2085
+// MISSING LINE 2086
+// MISSING LINE 2087
+// MISSING LINE 2088
+// MISSING LINE 2089
+// MISSING LINE 2090
+// MISSING LINE 2091
+// MISSING LINE 2092
+// MISSING LINE 2093
+// MISSING LINE 2094
+// MISSING LINE 2095
+// MISSING LINE 2096
+// MISSING LINE 2097
+// MISSING LINE 2098
+// MISSING LINE 2099
+// MISSING LINE 2100
+// MISSING LINE 2101
+// MISSING LINE 2102
+// MISSING LINE 2103
+// MISSING LINE 2104
+// MISSING LINE 2105
+// MISSING LINE 2106
+// MISSING LINE 2107
+// MISSING LINE 2108
+// MISSING LINE 2109
+// MISSING LINE 2110
+// MISSING LINE 2111
+// MISSING LINE 2112
+// MISSING LINE 2113
+// MISSING LINE 2114
+// MISSING LINE 2115
+// MISSING LINE 2116
+// MISSING LINE 2117
+// MISSING LINE 2118
+// MISSING LINE 2119
+// MISSING LINE 2120
+// MISSING LINE 2121
+// MISSING LINE 2122
+// MISSING LINE 2123
+// MISSING LINE 2124
+// MISSING LINE 2125
+// MISSING LINE 2126
+// MISSING LINE 2127
+// MISSING LINE 2128
+// MISSING LINE 2129
+// MISSING LINE 2130
+// MISSING LINE 2131
+// MISSING LINE 2132
+// MISSING LINE 2133
+// MISSING LINE 2134
+// MISSING LINE 2135
+// MISSING LINE 2136
+// MISSING LINE 2137
+// MISSING LINE 2138
+// MISSING LINE 2139
+// MISSING LINE 2140
+// MISSING LINE 2141
+// MISSING LINE 2142
+// MISSING LINE 2143
+// MISSING LINE 2144
+// MISSING LINE 2145
+// MISSING LINE 2146
+// MISSING LINE 2147
+// MISSING LINE 2148
+// MISSING LINE 2149
+// MISSING LINE 2150
+// MISSING LINE 2151
+// MISSING LINE 2152
+// MISSING LINE 2153
+// MISSING LINE 2154
+// MISSING LINE 2155
+// MISSING LINE 2156
+// MISSING LINE 2157
+// MISSING LINE 2158
+// MISSING LINE 2159
+// MISSING LINE 2160
+// MISSING LINE 2161
+// MISSING LINE 2162
+// MISSING LINE 2163
+// MISSING LINE 2164
+// MISSING LINE 2165
+// MISSING LINE 2166
+// MISSING LINE 2167
+// MISSING LINE 2168
+// MISSING LINE 2169
+// MISSING LINE 2170
+// MISSING LINE 2171
+// MISSING LINE 2172
+// MISSING LINE 2173
+// MISSING LINE 2174
+// MISSING LINE 2175
+// MISSING LINE 2176
+// MISSING LINE 2177
+// MISSING LINE 2178
+// MISSING LINE 2179
+// MISSING LINE 2180
+// MISSING LINE 2181
+// MISSING LINE 2182
+// MISSING LINE 2183
+// MISSING LINE 2184
+// MISSING LINE 2185
+// MISSING LINE 2186
+// MISSING LINE 2187
+// MISSING LINE 2188
+// MISSING LINE 2189
+// MISSING LINE 2190
+// MISSING LINE 2191
+// MISSING LINE 2192
+// MISSING LINE 2193
+// MISSING LINE 2194
+// MISSING LINE 2195
+// MISSING LINE 2196
+// MISSING LINE 2197
+// MISSING LINE 2198
+// MISSING LINE 2199
+// MISSING LINE 2200
+// MISSING LINE 2201
+// MISSING LINE 2202
+// MISSING LINE 2203
+// MISSING LINE 2204
+// MISSING LINE 2205
+// MISSING LINE 2206
+// MISSING LINE 2207
+// MISSING LINE 2208
+// MISSING LINE 2209
+// MISSING LINE 2210
+// MISSING LINE 2211
+// MISSING LINE 2212
+// MISSING LINE 2213
+// MISSING LINE 2214
+// MISSING LINE 2215
+// MISSING LINE 2216
+// MISSING LINE 2217
+// MISSING LINE 2218
+// MISSING LINE 2219
+// MISSING LINE 2220
+// MISSING LINE 2221
+// MISSING LINE 2222
+// MISSING LINE 2223
+// MISSING LINE 2224
+// MISSING LINE 2225
+// MISSING LINE 2226
+// MISSING LINE 2227
+// MISSING LINE 2228
+// MISSING LINE 2229
+// MISSING LINE 2230
+// MISSING LINE 2231
+// MISSING LINE 2232
+// MISSING LINE 2233
+// MISSING LINE 2234
+// MISSING LINE 2235
+// MISSING LINE 2236
+// MISSING LINE 2237
+// MISSING LINE 2238
+// MISSING LINE 2239
+// MISSING LINE 2240
+// MISSING LINE 2241
+// MISSING LINE 2242
+// MISSING LINE 2243
+// MISSING LINE 2244
+// MISSING LINE 2245
+// MISSING LINE 2246
+// MISSING LINE 2247
+// MISSING LINE 2248
+// MISSING LINE 2249
+// MISSING LINE 2250
+// MISSING LINE 2251
+// MISSING LINE 2252
+// MISSING LINE 2253
+// MISSING LINE 2254
+// MISSING LINE 2255
+// MISSING LINE 2256
+// MISSING LINE 2257
+// MISSING LINE 2258
+// MISSING LINE 2259
+// MISSING LINE 2260
+// MISSING LINE 2261
+// MISSING LINE 2262
+// MISSING LINE 2263
+// MISSING LINE 2264
+// MISSING LINE 2265
+// MISSING LINE 2266
+// MISSING LINE 2267
+// MISSING LINE 2268
+// MISSING LINE 2269
+// MISSING LINE 2270
+// MISSING LINE 2271
+// MISSING LINE 2272
+// MISSING LINE 2273
+// MISSING LINE 2274
+// MISSING LINE 2275
+// MISSING LINE 2276
+// MISSING LINE 2277
+// MISSING LINE 2278
+// MISSING LINE 2279
+// MISSING LINE 2280
+// MISSING LINE 2281
+// MISSING LINE 2282
+// MISSING LINE 2283
+// MISSING LINE 2284
+// MISSING LINE 2285
+// MISSING LINE 2286
+// MISSING LINE 2287
+// MISSING LINE 2288
+// MISSING LINE 2289
+// MISSING LINE 2290
+// MISSING LINE 2291
+// MISSING LINE 2292
+// MISSING LINE 2293
+// MISSING LINE 2294
+// MISSING LINE 2295
+// MISSING LINE 2296
+// MISSING LINE 2297
+// MISSING LINE 2298
+// MISSING LINE 2299
+// MISSING LINE 2300
+// MISSING LINE 2301
+// MISSING LINE 2302
+// MISSING LINE 2303
+// MISSING LINE 2304
+// MISSING LINE 2305
+// MISSING LINE 2306
+// MISSING LINE 2307
+// MISSING LINE 2308
+// MISSING LINE 2309
+// MISSING LINE 2310
+// MISSING LINE 2311
+// MISSING LINE 2312
+// MISSING LINE 2313
+// MISSING LINE 2314
+// MISSING LINE 2315
+// MISSING LINE 2316
+// MISSING LINE 2317
+// MISSING LINE 2318
+// MISSING LINE 2319
+// MISSING LINE 2320
+// MISSING LINE 2321
+// MISSING LINE 2322
+// MISSING LINE 2323
+// MISSING LINE 2324
+// MISSING LINE 2325
+// MISSING LINE 2326
+// MISSING LINE 2327
+// MISSING LINE 2328
+// MISSING LINE 2329
+// MISSING LINE 2330
+// MISSING LINE 2331
+// MISSING LINE 2332
+// MISSING LINE 2333
+// MISSING LINE 2334
+// MISSING LINE 2335
+// MISSING LINE 2336
+// MISSING LINE 2337
+// MISSING LINE 2338
+// MISSING LINE 2339
+// MISSING LINE 2340
+// MISSING LINE 2341
+// MISSING LINE 2342
+// MISSING LINE 2343
+// MISSING LINE 2344
+// MISSING LINE 2345
+// MISSING LINE 2346
+// MISSING LINE 2347
+// MISSING LINE 2348
+// MISSING LINE 2349
+// MISSING LINE 2350
+// MISSING LINE 2351
+// MISSING LINE 2352
+// MISSING LINE 2353
+// MISSING LINE 2354
+// MISSING LINE 2355
+// MISSING LINE 2356
+// MISSING LINE 2357
+// MISSING LINE 2358
+// MISSING LINE 2359
+// MISSING LINE 2360
+// MISSING LINE 2361
+// MISSING LINE 2362
+// MISSING LINE 2363
+// MISSING LINE 2364
+// MISSING LINE 2365
+// MISSING LINE 2366
+// MISSING LINE 2367
+// MISSING LINE 2368
+// MISSING LINE 2369
+// MISSING LINE 2370
+
+  console.log('\n═══════════════════════════════════════════════════════════');
+  console.log(' RESULTS SUMMARY');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log(`  Category Accuracy:  ${catAcc}/${n}  (${Math.round(catAcc/n*100)}%)`);
+  console.log(`  Urgency Accuracy:   ${urgAcc}/${n}  (${Math.round(urgAcc/n*100)}%)`);
+  console.log(`  Sentiment Accuracy: ${sentAcc}/${n}  (${Math.round(sentAcc/n*100)}%)`);
+  console.log(`  All-3 Pass Rate:    ${allAcc}/${n}  (${Math.round(allAcc/n*100)}%)`);
+  console.log('═══════════════════════════════════════════════════════════');
+
+  const failures = results.filter(r => !r.allOk);
+  if (failures.length > 0) {
+    console.log('\n FAILURES — Expected vs Got:');
+    failures.forEach((f, i) => {
+      console.log(`\n  [${i + 1}] "${f.message.slice(0, 70)}"`);
+      if (!f.catOk)  console.log(`       Category:  expected "${f.expected.category}"  got "${f.got.category}"`);
+      if (!f.urgOk)  console.log(`       Urgency:   expected "${f.expected.urgency}"   got "${f.got.urgency}"`);
+      if (!f.sentOk) console.log(`       Sentiment: expected "${f.expected.sentiment}" got "${f.got.sentiment}"`);
+    });
+  }
+
+  console.log('\n Run again with: npx tsx eval.ts\n');
+}
+
+// Run if called directly
+runBenchmark().catch(console.error);
+```
+
+-----
+
+### FEATURE 7: Urgency Filter Buttons in Dashboard
+
+**File:** `src/App.tsx`
+
+Add state:
+
+```typescript
+const [urgencyFilter, setUrgencyFilter] = React.useState<string>('All');
+```
+
+Add the filter bar above the ticket list (inside the dashboard area):
+
+```tsx
+<div className="flex items-center gap-2 px-4 py-2 flex-wrap">
+  {(['All', 'Critical', 'High', 'Medium'] as const).map(level => (
+    <button
+      key={level}
+      onClick={() => setUrgencyFilter(level)}
+      className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+        urgencyFilter === level
+          ? level === 'Critical' ? 'bg-red-600 text-white'
+          : level === 'High'     ? 'bg-orange-500 text-white'
+          : level === 'Medium'   ? 'bg-yellow-500 text-black'
+          : 'bg-white text-black'
+          : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+      }`}
+    >
+      {level === 'Critical' ? '🔴 ' : level === 'High' ? '🟠 ' : level === 'Medium' ? '🟡 ' : ''}
+      {level}
+    </button>
+  ))}
+</div>
+```
+
+Apply the filter in the existing `filteredTickets` useMemo (add urgency to the filter conditions):
+
+```typescript
+const filteredTickets = React.useMemo(() =>
+  tickets.filter(t =>
+    (urgencyFilter === 'All' || t.urgency === urgencyFilter) &&
+    // ... keep any existing filter cond
+// MISSING LINE 2442
+// MISSING LINE 2443
+// MISSING LINE 2444
+// MISSING LINE 2445
+// MISSING LINE 2446
+// MISSING LINE 2447
+// MISSING LINE 2448
+// MISSING LINE 2449
+// MISSING LINE 2450
+// MISSING LINE 2451
+// MISSING LINE 2452
+// MISSING LINE 2453
+// MISSING LINE 2454
+// MISSING LINE 2455
+// MISSING LINE 2456
+// MISSING LINE 2457
+// MISSING LINE 2458
+// MISSING LINE 2459
+// MISSING LINE 2460
+// MISSING LINE 2461
+// MISSING LINE 2462
+// MISSING LINE 2463
+// MISSING LINE 2464
+// MISSING LINE 2465
+// MISSING LINE 2466
+// MISSING LINE 2467
+// MISSING LINE 2468
+// MISSING LINE 2469
+// MISSING LINE 2470
+// MISSING LINE 2471
+// MISSING LINE 2472
+// MISSING LINE 2473
+// MISSING LINE 2474
+// MISSING LINE 2475
+// MISSING LINE 2476
+// MISSING LINE 2477
+// MISSING LINE 2478
+// MISSING LINE 2479
+// MISSING LINE 2480
+// MISSING LINE 2481
+// MISSING LINE 2482
+// MISSING LINE 2483
+// MISSING LINE 2484
+// MISSING LINE 2485
+// MISSING LINE 2486
+// MISSING LINE 2487
+// MISSING LINE 2488
+// MISSING LINE 2489
+// MISSING LINE 2490
+// MISSING LINE 2491
+// MISSING LINE 2492
+// MISSING LINE 2493
+// MISSING LINE 2494
+// MISSING LINE 2495
+// MISSING LINE 2496
+// MISSING LINE 2497
+// MISSING LINE 2498
+// MISSING LINE 2499
+// MISSING LINE 2500
+// MISSING LINE 2501
+// MISSING LINE 2502
+// MISSING LINE 2503
+// MISSING LINE 2504
+// MISSING LINE 2505
+// MISSING LINE 2506
+// MISSING LINE 2507
+// MISSING LINE 2508
+// MISSING LINE 2509
+// MISSING LINE 2510
+// MISSING LINE 2511
+// MISSING LINE 2512
+// MISSING LINE 2513
+// MISSING LINE 2514
+// MISSING LINE 2515
+// MISSING LINE 2516
+// MISSING LINE 2517
+// MISSING LINE 2518
+// MISSING LINE 2519
+
+1. **Redis-backed admin cache** — requires provisioning a Redis instance. Current fix (TELEGRAM_ADMIN_USER_IDS env var fast-path) eliminates the Telegram API latency issue for known admins. Full Redis caching is the next step after Redis is provisioned.
+1. **GDPR Data Processing Agreements** — you need to sign DPAs with Groq and Google. Both have DPA templates:
+- Groq: <https://groq.com/legal/data-processing-addendum/>
+- Google: available through Google Cloud console
+  The PII redaction added in T1-C reduces exposure in the meantime.
+1. **Git history secret scan** — run `npx gitleaks detect --source . --verbose` against the full git history. If any secrets are found, rotate them immediately, then remove from history with `git filter-repo`.
+1. **Privacy policy and Terms of Service** — required before public deployment. Must accurately describe: what data is collected, why, how long it is kept, which processors it is shared with (Groq, Gemini, Supabase), and user rights under GDPR/NDPA.
+1. **CORS origin restriction** — find the current CORS configuration in server.ts. If `origin: '*'` is set in production, change it to the specific domain(s) the dashboard is served from.
+1. **Model routing cascade** — after running the benchmark and confirming LLaMA 8B accuracy, add a fast Tier 1 classification with `llama3-8b-8192` for messages where confidence is high, and reserve the 70B model for ambiguous cases. This reduces Groq cost 40–70% at scale.
+1. **Soft deletes** — adding `deleted_at TIMESTAMPTZ` to the tickets table is straightforward but requires updating every query that reads tickets to add `.is(null, 'deleted_at')`. Do this as a standalone session.
+// MISSING LINE 2531
+// MISSING LINE 2532
+// MISSING LINE 2533
+// MISSING LINE 2534
+// MISSING LINE 2535
+// MISSING LINE 2536
+// MISSING LINE 2537
+// MISSING LINE 2538
+// MISSING LINE 2539
+// MISSING LINE 2540
+// MISSING LINE 2541
+// MISSING LINE 2542
+// MISSING LINE 2543
+// MISSING LINE 2544
+// MISSING LINE 2545
+// MISSING LINE 2546
+// MISSING LINE 2547
+// MISSING LINE 2548
+// MISSING LINE 2549
+// MISSING LINE 2550
+// MISSING LINE 2551
+// MISSING LINE 2552
+// MISSING LINE 2553
+// MISSING LINE 2554
+// MISSING LINE 2555
+// MISSING LINE 2556
+// MISSING LINE 2557
+// MISSING LINE 2558
+// MISSING LINE 2559
+// MISSING LINE 2560
+// MISSING LINE 2561
+// MISSING LINE 2562
+// MISSING LINE 2563
+// MISSING LINE 2564
+// MISSING LINE 2565
+// MISSING LINE 2566
+// MISSING LINE 2567
+// MISSING LINE 2568
+// MISSING LINE 2569
+// MISSING LINE 2570
+// MISSING LINE 2571
+// MISSING LINE 2572
+// MISSING LINE 2573
+// MISSING LINE 2574
+// MISSING LINE 2575
+// MISSING LINE 2576
+// MISSING LINE 2577
+// MISSING LINE 2578
+// MISSING LINE 2579
+// MISSING LINE 2580
+// MISSING LINE 2581
+// MISSING LINE 2582
+// MISSING LINE 2583
+// MISSING LINE 2584
+// MISSING LINE 2585
+// MISSING LINE 2586
+// MISSING LINE 2587
+// MISSING LINE 2588
+// MISSING LINE 2589
+// MISSING LINE 2590
+// MISSING LINE 2591
+// MISSING LINE 2592
+// MISSING LINE 2593
+// MISSING LINE 2594
+// MISSING LINE 2595
+// MISSING LINE 2596
+// MISSING LINE 2597
+// MISSING LINE 2598
+// MISSING LINE 2599
+// MISSING LINE 2600
+// MISSING LINE 2601
+// MISSING LINE 2602
+// MISSING LINE 2603
+// MISSING LINE 2604
+// MISSING LINE 2605
+// MISSING LINE 2606
+// MISSING LINE 2607
+// MISSING LINE 2608
+// MISSING LINE 2609
+// MISSING LINE 2610
+// MISSING LINE 2611
+// MISSING LINE 2612
+// MISSING LINE 2613
+// MISSING LINE 2614
+// MISSING LINE 2615
+// MISSING LINE 2616
+// MISSING LINE 2617
+// MISSING LINE 2618
+// MISSING LINE 2619
+// MISSING LINE 2620
+// MISSING LINE 2621
+// MISSING LINE 2622
+// MISSING LINE 2623
+// MISSING LINE 2624
+// MISSING LINE 2625
+// MISSING LINE 2626
+// MISSING LINE 2627
+// MISSING LINE 2628
+// MISSING LINE 2629
+// MISSING LINE 2630
+// MISSING LINE 2631
+// MISSING LINE 2632
+// MISSING LINE 2633
+// MISSING LINE 2634
+// MISSING LINE 2635
+// MISSING LINE 2636
+// MISSING LINE 2637
+// MISSING LINE 2638
+// MISSING LINE 2639
+// MISSING LINE 2640
+// MISSING LINE 2641
+// MISSING LINE 2642
+// MISSING LINE 2643
+// MISSING LINE 2644
+// MISSING LINE 2645
+// MISSING LINE 2646
+// MISSING LINE 2647
+// MISSING LINE 2648
+// MISSING LINE 2649
+// MISSING LINE 2650
+// MISSING LINE 2651
+// MISSING LINE 2652
+// MISSING LINE 2653
+// MISSING LINE 2654
+// MISSING LINE 2655
+// MISSING LINE 2656
+// MISSING LINE 2657
+// MISSING LINE 2658
+// MISSING LINE 2659
+// MISSING LINE 2660
+// MISSING LINE 2661
+// MISSING LINE 2662
+// MISSING LINE 2663
+// MISSING LINE 2664
+// MISSING LINE 2665
+// MISSING LINE 2666
+// MISSING LINE 2667
+// MISSING LINE 2668
+// MISSING LINE 2669
+// MISSING LINE 2670
+// MISSING LINE 2671
+// MISSING LINE 2672
+// MISSING LINE 2673
+// MISSING LINE 2674
+// MISSING LINE 2675
+// MISSING LINE 2676
+// MISSING LINE 2677
+// MISSING LINE 2678
+// MISSING LINE 2679
+// MISSING LINE 2680
+// MISSING LINE 2681
+// MISSING LINE 2682
+// MISSING LINE 2683
+// MISSING LINE 2684
+// MISSING LINE 2685
+// MISSING LINE 2686
+// MISSING LINE 2687
+// MISSING LINE 2688
+// MISSING LINE 2689
+// MISSING LINE 2690
+// MISSING LINE 2691
+// MISSING LINE 2692
+// MISSING LINE 2693
+// MISSING LINE 2694
+// MISSING LINE 2695
+// MISSING LINE 2696
+// MISSING LINE 2697
+// MISSING LINE 2698
+// MISSING LINE 2699
+// MISSING LINE 2700
+// MISSING LINE 2701
+// MISSING LINE 2702
+// MISSING LINE 2703
+// MISSING LINE 2704
+// MISSING LINE 2705
+// MISSING LINE 2706
+// MISSING LINE 2707
+// MISSING LINE 2708
+// MISSING LINE 2709
+// MISSING LINE 2710
+// MISSING LINE 2711
+// MISSING LINE 2712
+// MISSING LINE 2713
+// MISSING LINE 2714
+// MISSING LINE 2715
+// MISSING LINE 2716
+// MISSING LINE 2717
+// MISSING LINE 2718
+// MISSING LINE 2719
+// MISSING LINE 2720
+// MISSING LINE 2721
+// MISSING LINE 2722
+// MISSING LINE 2723
+// MISSING LINE 2724
+// MISSING LINE 2725
+// MISSING LINE 2726
+// MISSING LINE 2727
+// MISSING LINE 2728
+// MISSING LINE 2729
+// MISSING LINE 2730
+// MISSING LINE 2731
+// MISSING LINE 2732
+// MISSING LINE 2733
+// MISSING LINE 2734
+// MISSING LINE 2735
+// MISSING LINE 2736
+// MISSING LINE 2737
+// MISSING LINE 2738
+// MISSING LINE 2739
+// MISSING LINE 2740
+// MISSING LINE 2741
+// MISSING LINE 2742
+// MISSING LINE 2743
+// MISSING LINE 2744
+// MISSING LINE 2745
+// MISSING LINE 2746
+// MISSING LINE 2747
+// MISSING LINE 2748
+// MISSING LINE 2749
+// MISSING LINE 2750
+// MISSING LINE 2751
+// MISSING LINE 2752
+// MISSING LINE 2753
+// MISSING LINE 2754
+// MISSING LINE 2755
+// MISSING LINE 2756
+// MISSING LINE 2757
+// MISSING LINE 2758
+// MISSING LINE 2759
+// MISSING LINE 2760
+// MISSING LINE 2761
+// MISSING LINE 2762
+// MISSING LINE 2763
+// MISSING LINE 2764
+// MISSING LINE 2765
+// MISSING LINE 2766
+// MISSING LINE 2767
+// MISSING LINE 2768
+// MISSING LINE 2769
+// MISSING LINE 2770
+// MISSING LINE 2771
+// MISSING LINE 2772
+// MISSING LINE 2773
+// MISSING LINE 2774
+// MISSING LINE 2775
+// MISSING LINE 2776
+// MISSING LINE 2777
+// MISSING LINE 2778
+// MISSING LINE 2779
+// MISSING LINE 2780
+// MISSING LINE 2781
+// MISSING LINE 2782
+// MISSING LINE 2783
+// MISSING LINE 2784
+// MISSING LINE 2785
+// MISSING LINE 2786
+// MISSING LINE 2787
+// MISSING LINE 2788
+// MISSING LINE 2789
+// MISSING LINE 2790
+// MISSING LINE 2791
+// MISSING LINE 2792
+// MISSING LINE 2793
+// MISSING LINE 2794
+// MISSING LINE 2795
+// MISSING LINE 2796
+// MISSING LINE 2797
+// MISSING LINE 2798
+// MISSING LINE 2799
+// MISSING LINE 2800
+// MISSING LINE 2801
+// MISSING LINE 2802
+// MISSING LINE 2803
+// MISSING LINE 2804
+// MISSING LINE 2805
+// MISSING LINE 2806
+// MISSING LINE 2807
+// MISSING LINE 2808
+// MISSING LINE 2809
+// MISSING LINE 2810
+// MISSING LINE 2811
+// MISSING LINE 2812
+// MISSING LINE 2813
+// MISSING LINE 2814
+// MISSING LINE 2815
+// MISSING LINE 2816
+// MISSING LINE 2817
+// MISSING LINE 2818
+// MISSING LINE 2819
+// MISSING LINE 2820
+// MISSING LINE 2821
+// MISSING LINE 2822
+// MISSING LINE 2823
+// MISSING LINE 2824
+// MISSING LINE 2825
+// MISSING LINE 2826
+// MISSING LINE 2827
+// MISSING LINE 2828
+// MISSING LINE 2829
+// MISSING LINE 2830
+// MISSING LINE 2831
+// MISSING LINE 2832
+// MISSING LINE 2833
+// MISSING LINE 2834
+// MISSING LINE 2835
+// MISSING LINE 2836
+// MISSING LINE 2837
+// MISSING LINE 2838
+// MISSING LINE 2839
+// MISSING LINE 2840
+// MISSING LINE 2841
+// MISSING LINE 2842
+// MISSING LINE 2843
+// MISSING LINE 2844
+// MISSING LINE 2845
+// MISSING LINE 2846
+// MISSING LINE 2847
+// MISSING LINE 2848
+// MISSING LINE 2849
+// MISSING LINE 2850
+// MISSING LINE 2851
+// MISSING LINE 2852
+// MISSING LINE 2853
+// MISSING LINE 2854
+// MISSING LINE 2855
+// MISSING LINE 2856
+// MISSING LINE 2857
+// MISSING LINE 2858
+// MISSING LINE 2859
+// MISSING LINE 2860
+// MISSING LINE 2861
+// MISSING LINE 2862
+// MISSING LINE 2863
+// MISSING LINE 2864
+// MISSING LINE 2865
+// MISSING LINE 2866
+// MISSING LINE 2867
+// MISSING LINE 2868
+// MISSING LINE 2869
+// MISSING LINE 2870
+// MISSING LINE 2871
+// MISSING LINE 2872
+// MISSING LINE 2873
+// MISSING LINE 2874
+// MISSING LINE 2875
+// MISSING LINE 2876
+// MISSING LINE 2877
+// MISSING LINE 2878
+// MISSING LINE 2879
+// MISSING LINE 2880
+// MISSING LINE 2881
+// MISSING LINE 2882
+// MISSING LINE 2883
+// MISSING LINE 2884
+// MISSING LINE 2885
+// MISSING LINE 2886
+// MISSING LINE 2887
+// MISSING LINE 2888
+// MISSING LINE 2889
+// MISSING LINE 2890
+// MISSING LINE 2891
+// MISSING LINE 2892
+// MISSING LINE 2893
+// MISSING LINE 2894
+// MISSING LINE 2895
+// MISSING LINE 2896
+// MISSING LINE 2897
+// MISSING LINE 2898
+// MISSING LINE 2899
+// MISSING LINE 2900
+// MISSING LINE 2901
+// MISSING LINE 2902
+// MISSING LINE 2903
+// MISSING LINE 2904
+// MISSING LINE 2905
+// MISSING LINE 2906
+// MISSING LINE 2907
+// MISSING LINE 2908
+// MISSING LINE 2909
+// MISSING LINE 2910
+// MISSING LINE 2911
+// MISSING LINE 2912
+// MISSING LINE 2913
+// MISSING LINE 2914
+// MISSING LINE 2915
+// MISSING LINE 2916
+// MISSING LINE 2917
+// MISSING LINE 2918
+// MISSING LINE 2919
+// MISSING LINE 2920
+// MISSING LINE 2921
+// MISSING LINE 2922
+// MISSING LINE 2923
+// MISSING LINE 2924
+// MISSING LINE 2925
+// MISSING LINE 2926
+// MISSING LINE 2927
+// MISSING LINE 2928
+// MISSING LINE 2929
+// MISSING LINE 2930
+// MISSING LINE 2931
+// MISSING LINE 2932
+// MISSING LINE 2933
+// MISSING LINE 2934
+// MISSING LINE 2935
+// MISSING LINE 2936
+// MISSING LINE 2937
+// MISSING LINE 2938
+// MISSING LINE 2939
+// MISSING LINE 2940
+// MISSING LINE 2941
+// MISSING LINE 2942
+// MISSING LINE 2943
+// MISSING LINE 2944
+// MISSING LINE 2945
+// MISSING LINE 2946
+// MISSING LINE 2947
+// MISSING LINE 2948
+// MISSING LINE 2949
+// MISSING LINE 2950
+// MISSING LINE 2951
+// MISSING LINE 2952
+// MISSING LINE 2953
+
+// MISSING LINE 2955
+// MISSING LINE 2956
