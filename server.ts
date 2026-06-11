@@ -1004,6 +1004,20 @@ Classify the user message below. Do NOT default to General Question unless the u
       throw new Error("Message too short or empty");
     }
     const supabase = getSupabase();
+    if (telegramId && !String(telegramId).startsWith("rand_")) {
+      const { data: existingMsg } = await supabase
+        .from("messages")
+        .select("id")
+        .eq("telegram_message_id", String(telegramId))
+        .maybeSingle();
+      if (existingMsg) {
+        logger.debug(
+          "Ingestion",
+          `Skipping duplicate telegramId ${telegramId}`,
+        );
+        return null;
+      }
+    }
     const msgDateISO = msgDate
       ? new Date(msgDate * 1e3).toISOString()
       : /* @__PURE__ */ new Date().toISOString();
@@ -1170,6 +1184,22 @@ Classify the user message below. Do NOT default to General Question unless the u
               "Ingestion",
               `User attached reply to ticket ${parentTicket.id}`,
             );
+            try {
+              await supabase.from("messages").insert({
+                telegram_message_id: String(telegramId),
+                group_id: groupId,
+                raw_text: text,
+                message_timestamp: msgDateISO,
+                ingested_at: new Date().toISOString(),
+                sender_hash: senderHash,
+              });
+            } catch (e) {
+              logger.error(
+                "Ingestion",
+                "Error inserting user reply into messages",
+                { error: e.message },
+              );
+            }
             return parentTicket;
           }
         } catch (err) {
@@ -1182,20 +1212,6 @@ Classify the user message below. Do NOT default to General Question unless the u
         logger.debug(
           "Ingestion",
           `Ignoring general user reply to message ${replyToMsgId}`,
-        );
-        return null;
-      }
-    }
-    if (telegramId && !String(telegramId).startsWith("rand_")) {
-      const { data: existingMsg } = await supabase
-        .from("messages")
-        .select("id")
-        .eq("telegram_message_id", String(telegramId))
-        .maybeSingle();
-      if (existingMsg) {
-        logger.debug(
-          "Ingestion",
-          `Skipping duplicate telegramId ${telegramId}`,
         );
         return null;
       }
