@@ -1789,6 +1789,20 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .select("id, status, urgency, created_at, updated_at, resolved_at, category")
         .order("created_at", { ascending: false })
         .limit(5e3);
+      // All date boundaries are Lagos calendar days (UTC+1, no DST), matching
+      // the Lagos-based "today" KPIs — the server itself runs in UTC on Railway.
+      const lagosDay = (d) =>
+        new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Africa/Lagos",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(d);
+      const isPlainDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+      const lagosDayStartISO = (dateStr) =>
+        new Date(`${dateStr}T00:00:00.000+01:00`).toISOString();
+      const lagosDayEndISO = (dateStr) =>
+        new Date(`${dateStr}T23:59:59.999+01:00`).toISOString();
       const applyBaseFilters = (q) => {
         let temp = q;
         if (user.role === "support") {
@@ -1809,17 +1823,30 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         ) {
           const days = parseInt(req.query.days as string);
           if (!isNaN(days)) {
-            const d = /* @__PURE__ */ new Date();
-            d.setDate(d.getDate() - (days - 1));
-            d.setHours(0, 0, 0, 0);
-            temp = temp.gte("created_at", d.toISOString());
+            const d = new Date(Date.now() - (days - 1) * 86400000);
+            temp = temp.gte("created_at", lagosDayStartISO(lagosDay(d)));
           }
         }
         if (req.query.days === "Custom") {
-          if (req.query.startDate)
-            temp = temp.gte("created_at", req.query.startDate);
-          if (req.query.endDate)
-            temp = temp.lte("created_at", req.query.endDate);
+          const startDate = String(req.query.startDate || "");
+          const endDate = String(req.query.endDate || "");
+          if (startDate)
+            temp = temp.gte(
+              "created_at",
+              isPlainDate(startDate) ? lagosDayStartISO(startDate) : startDate,
+            );
+          if (endDate)
+            temp = temp.lte(
+              "created_at",
+              isPlainDate(endDate) ? lagosDayEndISO(endDate) : endDate,
+            );
+        }
+        // Search must filter the KPI stats too, not just the table — it lives
+        // here so both queries see it.
+        if (req.query.search) {
+          temp = temp.or(
+            `summary.ilike.%${req.query.search}%,category.ilike.%${req.query.search}%,raw_text.ilike.%${req.query.search}%`,
+          );
         }
         return temp;
       };
@@ -1833,11 +1860,6 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         }
         if (req.query.category && req.query.category !== "All") {
           temp = temp.eq("category", req.query.category);
-        }
-        if (req.query.search) {
-          temp = temp.or(
-            `summary.ilike.%${req.query.search}%,category.ilike.%${req.query.search}%,raw_text.ilike.%${req.query.search}%`,
-          );
         }
         return temp;
       };
@@ -1866,13 +1888,6 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       }
       // "Today" is computed in the support team's timezone (Lagos, UTC+1),
       // not the server's — Railway/Cloud Run containers run in UTC.
-      const lagosDay = (d) =>
-        new Intl.DateTimeFormat("en-CA", {
-          timeZone: "Africa/Lagos",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-        }).format(d);
       const todayLagos = lagosDay(/* @__PURE__ */ new Date());
       const isToday = (d) => lagosDay(d) === todayLagos;
       const allData = statsData || [];
