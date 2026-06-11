@@ -1222,6 +1222,73 @@ Classify the user message below. Do NOT default to General Question unless the u
         return null;
       }
     }
+    if (isAdminSender && !replyToMsgId) {
+      // 90-second window heuristic: an admin answering in the group without
+      // quoting anyone is almost always responding to whatever just came in.
+      // Attach the reply to the most recent open ticket in this group if that
+      // ticket arrived within the 90 seconds before the admin's message;
+      // otherwise fall through and record the admin message as before.
+      try {
+        const adminMsgTime = new Date(msgDateISO).getTime();
+        const windowStartISO = new Date(adminMsgTime - 90 * 1e3).toISOString();
+        const { data: candidates } = await supabase
+          .from("tickets")
+          .select("*")
+          .eq("group_id", groupId)
+          .eq("is_admin_message", false)
+          .in("status", ["Open", "In Review"])
+          .gte("created_at", windowStartISO)
+          .lte("created_at", msgDateISO)
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (candidates && candidates.length > 0) {
+          const parentTicket = candidates[0];
+          const newRawText =
+            parentTicket.raw_text +
+            `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+          await supabase
+            .from("tickets")
+            .update({
+              raw_text: newRawText,
+              status: "In Review",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", parentTicket.id);
+          logger.info(
+            "Ingestion",
+            `Unquoted admin reply attached to ticket ${parentTicket.id} (created within 90s window)`,
+          );
+          extractAndLearnKeywords(supabase, text).catch(() => {});
+          try {
+            await supabase.from("messages").insert({
+              telegram_message_id: String(telegramId),
+              group_id: groupId,
+              raw_text: text,
+              message_timestamp: msgDateISO,
+              ingested_at: new Date().toISOString(),
+              sender_hash: senderHash,
+            });
+          } catch (e) {
+            logger.error(
+              "Ingestion",
+              "Error inserting unquoted admin reply into messages",
+              { error: e.message },
+            );
+          }
+          return parentTicket;
+        }
+        logger.debug(
+          "Ingestion",
+          "No open ticket within 90s window for unquoted admin message",
+        );
+      } catch (err) {
+        logger.error(
+          "Ingestion",
+          "Error in 90s window lookup for unquoted admin message",
+          { error: err.message },
+        );
+      }
+    }
     const isPreFiltered =
       !skipPreFilter && !shouldProcessMessage(text, learnedKeywordCache);
     if (isPreFiltered) {
@@ -2413,7 +2480,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
             .status(403)
             .json({ error: "Forbidden: insufficient permissions" });
         }
-        const { text, telegramId } = req.body;
+        const { text, telegramId, isAdmin, msgDate } = req.body;
         if (!text || typeof text !== "string" || text.trim().length === 0) {
           return res
             .status(400)
@@ -2434,8 +2501,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           tId,
           targetGroup,
           void 0,
-          void 0,
-          false,
+          // optional unix-seconds timestamp + admin flag let super_admins
+          // simulate admin replies when testing ingestion heuristics
+          msgDate ? Number(msgDate) : void 0,
+          isAdmin === true,
           void 0,
           false,
           "api_ingest",
