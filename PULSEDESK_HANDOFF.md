@@ -58,6 +58,12 @@
 *   **Dishonest KPI Calculations (fixed 2026-06-11, commit `2ea6bea`):**
     *   *Bug:* "Resolved" metrics counted Dismissed spam as resolutions (rate showed 80%, truth 53%); "Resolved Today" read the never-maintained `updated_at` column; "today" used server (UTC) timezone.
     *   *Fix:* Dismissed excluded from all resolved metrics (Resolution Rate = Resolved ÷ (Resolved + Active)); all four status-writing paths (status endpoint, user auto-resolve, Telegram delete handler, admin-message insert) now stamp `resolved_at`/`updated_at`; "today" computed in Africa/Lagos. Verified by live API comparison and a resolve/reopen round-trip.
+*   **Filter Inconsistency on KPI Cards (audited & fixed 2026-06-11, commit `9c2ea4f`):**
+    *   *Audit result:* category, urgency, and date filters already reached the stats query (verified live: stats row counts tracked table totals exactly). The real problems: (a) the search box filtered the table but the KPI cards kept showing unfiltered numbers (proven: 103 table rows vs 822 stats rows); (b) a custom date range dropped the entire end day — "today to today" returned 0 tickets while 4 existed; (c) the "last N days" cutoff used the server clock (UTC on Railway) instead of Lagos.
+    *   *Fix:* search moved into the shared base filters so both queries see it; all date boundaries (`days=N`, custom start/end) computed as Lagos calendar days. Verified against a server running with TZ=UTC (Railway simulation). Note: the `status` filter intentionally never reaches stats — the KPI cards break tickets down by status.
+*   **Unquoted Admin Replies Created Orphan Tickets (fixed 2026-06-11, commit `6c66bf2`):**
+    *   *Bug:* When an admin answered in the group without quoting the user, the system could not link the reply to a ticket, so it was stored as its own separate Resolved "ticket" and the real ticket looked untouched.
+    *   *Fix:* 90-second window heuristic in `processAndIngestMessage` — an unquoted admin message attaches to the most recently ingested Open/In Review non-admin ticket in the same group if that ticket arrived within the previous 90 seconds; the ticket gets the `[ADMIN_REPLY]` block and is marked "In Review". Outside the window, behavior is unchanged. The top-of-function dedup makes re-scans idempotent. Verified end-to-end via the extended `/api/ingest` endpoint (attach-within-window, ignore-outside-window, re-ingest idempotency), test data cleaned up.
 
 ## 6. Every Feature Added & Why
 *   **Async Ingestion Pipeline:** To prevent the GramJS listener from blocking the main thread during high message volume.
@@ -80,6 +86,14 @@
 *   Demo Mode toggling.
 *   Re-processing the same Telegram message is now idempotent (verified 2026-06-11: "Skipping duplicate telegramId" fires; replies never duplicate).
 *   KPI cards verified against ground-truth DB counts (2026-06-11): Active, In Review, Resolved (Dismissed excluded), Resolution Rate 53%, with `resolved_at` stamped on every resolution path and Lagos-timezone day boundaries.
+*   Every dashboard filter (search, category, urgency, date, custom range) updates the KPI cards together with the table (verified 2026-06-11 against a UTC server).
+*   Unquoted admin replies attach to the right ticket via the 90-second window heuristic and mark it "In Review" (verified end-to-end 2026-06-11).
+*   Production build artifact verified locally (2026-06-11): `npm run build` then `node dist/server.mjs` boots, connects to Telegram, and answers `/api/health` ok — this is exactly what Railway runs per `railway.toml`.
+
+## 8b. Deployment (Railway)
+*   `railway.toml` at the repo root: builds with `npm run build`, starts with `node dist/server.mjs` (NOT `npm start` — that script contains a Windows-only `chcp` command), health check `/api/health` (5-min timeout for Telegram connect), `numReplicas = 1` pinned because each replica would open its own GramJS session and double-ingest.
+*   Railway injects `PORT` automatically — never set it manually.
+*   Env vars to set in the Railway dashboard (values from local `.env`): `GROQ_API_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DASHBOARD_PASSWORD`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_STRING`, `TELEGRAM_GROUP_USERNAME`, `TELEGRAM_ADMIN_USER_IDS`, `NODE_ENV=production`, `DEMO_MODE=false`; optional: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `HEARTBEAT_URL`, `SUPPORT_API_KEY`.
 
 ## 9. Suspected Broken, Untested, or Needs Verification
 *   **GramJS Session String Expiration:** Needs verification on how long the `TELEGRAM_SESSION_STRING` lasts before a re-auth is required.
