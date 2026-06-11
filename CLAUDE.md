@@ -17,3 +17,11 @@ Read PULSEDESK_HANDOFF.md and PRD.md first. Restate the task, list which files w
 
 ## End of every session
 Update PULSEDESK_HANDOFF.md, KNOWN_ISSUES.md, and PRD.md. Summarize what was done and what is pending.
+
+## Lessons learned
+- **Three overlapping ingestion paths:** live listener, AutoFetch (startup + every 15 min, 2-hour lookback), and manual backfill all call `processAndIngestMessage`. Any mutation inside that function MUST be idempotent — the `telegram_message_id` dedup check must stay at the very top, before any branch that writes.
+- **`tickets.updated_at` is NOT auto-maintained** — there is no DB trigger; code must set it explicitly on every update. `resolved_at` is the source of truth for when a ticket was closed; reopening clears it. Legacy tickets resolved before 2026-06-11 have `resolved_at = null` by design.
+- **Resolution Rate definition (product decision, 2026-06-11):** Resolved ÷ (Resolved + Active). Dismissed tickets are spam/chatter, never counted as resolutions anywhere.
+- **"Today" KPIs use Africa/Lagos**, not server time (Railway runs UTC).
+- **The reconstructed migration files do not match the live schema** — always verify columns against the live DB before trusting `supabase/migrations/`.
+- **Local testing runs on PORT=3100** (port 3000 is occupied by an unrelated MCP tool). Shell env vars override `.env` because dotenv does not override existing vars.

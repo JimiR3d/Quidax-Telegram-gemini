@@ -52,6 +52,12 @@
 *   **Demo Mode Interference:** 
     *   *Bug:* The system was not fetching live data due to `DEMO_MODE`. 
     *   *Fix:* Disabled `DEMO_MODE=false` in the `.env` to verify live connection.
+*   **Admin Reply Duplication (fixed 2026-06-11, commit `3b04b54`):**
+    *   *Bug:* Admin/user replies appeared 2-3x (worst case 23x) on the dashboard. The duplicate-message check in `processAndIngestMessage` ran *after* the reply-handling branches, so AutoFetch (every 15 min, 2-hour lookback) and backfills re-appended `[ADMIN_REPLY]`/`[USER_REPLY]` blocks to tickets on every pass.
+    *   *Fix:* Moved the `telegram_message_id` dedup check to the top of the function; user replies are now also recorded in `messages`. Existing data cleaned via previewed script: 446 duplicate blocks removed across 82 tickets, re-scan confirmed zero remain.
+*   **Dishonest KPI Calculations (fixed 2026-06-11, commit `2ea6bea`):**
+    *   *Bug:* "Resolved" metrics counted Dismissed spam as resolutions (rate showed 80%, truth 53%); "Resolved Today" read the never-maintained `updated_at` column; "today" used server (UTC) timezone.
+    *   *Fix:* Dismissed excluded from all resolved metrics (Resolution Rate = Resolved ÷ (Resolved + Active)); all four status-writing paths (status endpoint, user auto-resolve, Telegram delete handler, admin-message insert) now stamp `resolved_at`/`updated_at`; "today" computed in Africa/Lagos. Verified by live API comparison and a resolve/reopen round-trip.
 
 ## 6. Every Feature Added & Why
 *   **Async Ingestion Pipeline:** To prevent the GramJS listener from blocking the main thread during high message volume.
@@ -72,6 +78,8 @@
 *   Supabase data insertion bypassing RLS.
 *   Frontend dashboard rendering, data fetching, and UI updates.
 *   Demo Mode toggling.
+*   Re-processing the same Telegram message is now idempotent (verified 2026-06-11: "Skipping duplicate telegramId" fires; replies never duplicate).
+*   KPI cards verified against ground-truth DB counts (2026-06-11): Active, In Review, Resolved (Dismissed excluded), Resolution Rate 53%, with `resolved_at` stamped on every resolution path and Lagos-timezone day boundaries.
 
 ## 9. Suspected Broken, Untested, or Needs Verification
 *   **GramJS Session String Expiration:** Needs verification on how long the `TELEGRAM_SESSION_STRING` lasts before a re-auth is required.

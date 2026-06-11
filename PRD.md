@@ -11,9 +11,9 @@ Quidax (a leading Nigerian crypto exchange) manages highly active Telegram commu
 *   **Secondary:** Admins/Operators during the pitch phase (demonstrating the tool's effectiveness).
 
 ## 4. Current State
-*   **What Works:** Live Telegram listening, Groq-based LLaMA classification, Gemini suggested replies, Supabase storage, and the React dashboard polling system.
-*   **What Does Not:** Deep, nuanced categorization of Nigerian slang or highly specific crypto edge-cases; long-term session persistence for GramJS under load-balancer constraints.
-*   **What is Missing:** Robust human-in-the-loop training interfaces, automated Telegram thread replies, and granular sub-categories.
+*   **What Works:** Live Telegram listening, Groq-based LLaMA classification, Gemini suggested replies, Supabase storage, and the React dashboard polling system. As of 2026-06-11: message re-processing is idempotent (admin/user replies no longer duplicate), and all KPI cards are verified honest — Resolution Rate = Resolved ÷ (Resolved + Active) with Dismissed spam excluded, real `resolved_at` timestamps on every resolution path, Lagos-timezone day boundaries.
+*   **What Does Not:** Deep, nuanced categorization of Nigerian slang or highly specific crypto edge-cases; long-term session persistence for GramJS under load-balancer constraints; resolution detection for unquoted admin replies; date/category/urgency filter consistency across KPI cards (unaudited).
+*   **What is Missing:** Robust human-in-the-loop training interfaces, automated Telegram thread replies, granular sub-categories, and an Avg Response Time metric (requires storing time of first admin reply).
 
 ## 5. Core Features
 
