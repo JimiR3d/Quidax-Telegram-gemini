@@ -1,8 +1,26 @@
 node_modules/
 build/
 dist/
+dist_temp/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+
+# Temporary backups and generated files
+*.recovered
+*.recovered2
+*.reconstructed
+server_from_git.ts
+*.txt
+*.jsonl
+benchmark_cases.json
+history_summary.json
+
+# Test and diagnostic scripts
+*.mjs
+*.cjs
+test*.js
+fix*.js
+check*.py
