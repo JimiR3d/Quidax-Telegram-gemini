@@ -1042,7 +1042,12 @@ Classify the user message below. Do NOT default to General Question unless the u
             `\n\n[USER_REPLY (Auto-Resolved)]\n${text}\n[/USER_REPLY]`;
           await supabase
             .from("tickets")
-            .update({ raw_text: newRawText, status: "Resolved" })
+            .update({
+              raw_text: newRawText,
+              status: "Resolved",
+              resolved_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
             .eq("id", parentTicket.id);
           logger.info(
             "Ingestion",
@@ -1093,9 +1098,10 @@ Classify the user message below. Do NOT default to General Question unless the u
                 `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
               await supabase
                 .from("tickets")
-                .update({ 
-                  raw_text: newRawText, 
-                  status: parentTicket.status === "Resolved" ? "Resolved" : "In Review" 
+                .update({
+                  raw_text: newRawText,
+                  status: parentTicket.status === "Resolved" ? "Resolved" : "In Review",
+                  updated_at: new Date().toISOString(),
                 })
                 .eq("id", parentTicket.id);
               logger.info(
@@ -1258,6 +1264,7 @@ Classify the user message below. Do NOT default to General Question unless the u
       is_complaint: false,
       suggested_action: "Pending classification...",
       status: isAdminSender ? "Resolved" : "Open",
+      resolved_at: isAdminSender ? msgDateISO : null,
       raw_text: text,
       created_at: msgDateISO,
       is_admin_message: !!isAdminSender,
@@ -1597,7 +1604,11 @@ Classify the user message below. Do NOT default to General Question unless the u
                   if (msg) {
                     await supabase
                       .from("tickets")
-                      .update({ status: "Dismissed" })
+                      .update({
+                        status: "Dismissed",
+                        resolved_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString(),
+                      })
                       .eq("message_id", msg.id);
                     logger.info(
                       "Telegram",
@@ -1775,7 +1786,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .range(from, to);
       let statsQuery = supabase
         .from("tickets")
-        .select("id, status, urgency, created_at, updated_at, category")
+        .select("id, status, urgency, created_at, updated_at, resolved_at, category")
         .order("created_at", { ascending: false })
         .limit(5e3);
       const applyBaseFilters = (q) => {
@@ -1853,13 +1864,21 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         logger.error("TicketsAPI", "Error fetching statsData", { error: statsError });
         throw statsError;
       }
-      const now = /* @__PURE__ */ new Date();
-      const isToday = (d) =>
-        d.getDate() === now.getDate() &&
-        d.getMonth() === now.getMonth() &&
-        d.getFullYear() === now.getFullYear();
+      // "Today" is computed in the support team's timezone (Lagos, UTC+1),
+      // not the server's — Railway/Cloud Run containers run in UTC.
+      const lagosDay = (d) =>
+        new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Africa/Lagos",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(d);
+      const todayLagos = lagosDay(/* @__PURE__ */ new Date());
+      const isToday = (d) => lagosDay(d) === todayLagos;
       const allData = statsData || [];
-      const resolved = allData.filter((t) => t.status === "Resolved" || t.status === "Dismissed");
+      // Dismissed tickets (spam/chatter) are NOT resolutions — they are
+      // excluded from every resolved metric and from the resolution rate.
+      const resolved = allData.filter((t) => t.status === "Resolved");
       const openOrReviewOrClassifying = allData.filter(
         (t) => t.status === "Open" || t.status === "In Review" || t.status === "Classifying",
       );
@@ -1867,8 +1886,9 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         openCount: allData.filter((t) => t.status === "Open").length,
         activeCount: openOrReviewOrClassifying.length,
         escalatedCount: allData.filter((t) => t.status === "In Review").length,
-        resolvedTodayCount: resolved.filter((t) =>
-          isToday(new Date((t as any).updated_at || t.created_at))
+        resolvedTodayCount: resolved.filter(
+          (t) =>
+            (t as any).resolved_at && isToday(new Date((t as any).resolved_at)),
         ).length,
         resolvedCount: resolved.length,
         criticalCount: allData.filter(
@@ -1900,8 +1920,12 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         ).length,
         totalCount: count ?? 0,
         resolutionRate:
-          allData.length > 0
-            ? Math.round((resolved.length / allData.length) * 100)
+          resolved.length + openOrReviewOrClassifying.length > 0
+            ? Math.round(
+                (resolved.length /
+                  (resolved.length + openOrReviewOrClassifying.length)) *
+                  100,
+              )
             : 0,
         categoryCount: allData.reduce((acc, t) => {
           acc[t.category || "Uncategorized"] =
@@ -1909,12 +1933,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           return acc;
         }, {}),
         resolutionData: [
-          {
-            name: "Resolved",
-            value: allData.filter(
-              (t) => t.status === "Resolved" || t.status === "Dismissed",
-            ).length,
-          },
+          { name: "Resolved", value: resolved.length },
           { name: "Active", value: openOrReviewOrClassifying.length },
         ],
         rawStatsData: allData,
@@ -1961,9 +1980,17 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           .status(403)
           .json({ error: "Forbidden. Ticket belongs to another tenant." });
       }
+      const nowISO = new Date().toISOString();
+      const statusUpdate: Record<string, any> = {
+        status,
+        updated_at: nowISO,
+        // resolved_at records when the ticket was closed; reopening clears it
+        resolved_at:
+          status === "Resolved" || status === "Dismissed" ? nowISO : null,
+      };
       const { error: updateError } = await supabase
         .from("tickets")
-        .update({ status })
+        .update(statusUpdate)
         .eq("id", ticketId);
       if (updateError) throw updateError;
       logAuditAction(

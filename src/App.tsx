@@ -954,7 +954,7 @@ export default function App() {
                         </div>
                         <div className="w-full flex justify-center space-x-6">
                           <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2" /><span className="text-sm text-white/80 mr-2">Resolved</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[0]?.value || 0}</span></div>
-                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Open</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1]?.value || 0}</span></div>
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Active</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1]?.value || 0}</span></div>
                         </div>
                       </div>
                     )}
