@@ -2047,6 +2047,11 @@ ${lines.join("\n---\n")}`;
               const messages = await client.getMessages(targetGroup, {
                 limit: 20,
               });
+              // getMessages returns newest-first; process oldest-first so a
+              // parent is always ingested before its replies (quoted attach
+              // works within a single sweep) and ticket raw_text blocks
+              // append in chronological order.
+              messages.reverse();
               const cutoffDate = Math.floor(Date.now() / 1e3) - 2 * 60 * 60;
               for (const msg of messages) {
                 if (!msg || !msg.text) continue;
