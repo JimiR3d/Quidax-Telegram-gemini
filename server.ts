@@ -968,6 +968,127 @@ Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Jus
 - "Processing" for >24h on a withdrawal = High urgency. >72h = Critical.
 
 Classify the user message below. Do NOT default to General Question unless the user is genuinely only asking for information.`;
+  // Milestone 3: when an admin's reply implies the AI picked the wrong
+  // category, silently fix the ticket and record the correction in the
+  // corrections table (few-shot injection reads that table to learn).
+  const RECLASSIFY_SYSTEM_PROMPT = `You are auditing a support-ticket classification for Quidax, a Nigerian crypto exchange. You will see the user's original message, the category the AI assigned, and the reply a human support admin sent. The admin's reply is strong evidence of what the ticket is really about.
+
+Valid categories: ${VALID_CATEGORIES.join(", ")}.
+
+If the admin's reply clearly shows the assigned category is wrong, output the correct one. If the admin's reply is generic (a greeting, "we are looking into it", "please DM us") or consistent with the assigned category, keep the assigned category.
+
+Respond ONLY with raw JSON: {"category": "<one of the valid categories>"}`;
+  function originalMessageText(rawText) {
+    // tickets.raw_text accumulates [ADMIN_REPLY]/[USER_REPLY] blocks; the
+    // original user message is everything before the first block.
+    const idx = String(rawText || "").search(/\n\n\[(ADMIN_REPLY|USER_REPLY)/);
+    return (idx === -1 ? String(rawText || "") : rawText.slice(0, idx)).trim();
+  }
+  async function reclassifyFromAdminReply(
+    supabase,
+    ticketId,
+    adminReplyText,
+    correctedBy,
+  ) {
+    // Re-fetch so we judge the category the classifier actually settled on —
+    // the admin can reply inside the ~5-10s async classification window, in
+    // which case the ticket still holds placeholder values. Wait once for it
+    // to settle; if it never does, skip rather than record a bogus original.
+    let ticket = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { data } = await supabase
+        .from("tickets")
+        .select("id, category, raw_text, is_admin_message, summary")
+        .eq("id", ticketId)
+        .maybeSingle();
+      ticket = data;
+      if (!ticket || ticket.summary !== "Processing message...") break;
+      await new Promise((r) => setTimeout(r, 12e3));
+    }
+    if (!ticket || ticket.is_admin_message) return;
+    if (ticket.summary === "Processing message...") {
+      logger.warn(
+        "Reclassify",
+        `Skipping ticket ${ticketId}: classification still pending after wait`,
+      );
+      return;
+    }
+    const originalMsg = originalMessageText(ticket.raw_text);
+    if (!originalMsg) return;
+    const safeMsg = redactPII(sanitizeForPrompt(originalMsg));
+    const safeReply = redactPII(sanitizeForPrompt(adminReplyText));
+    const response = await groqBreaker.call(() =>
+      withTimeout(
+        openai.chat.completions.create({
+          model: "llama-3.1-8b-instant",
+          temperature: 0,
+          messages: [
+            { role: "system", content: RECLASSIFY_SYSTEM_PROMPT },
+            {
+              role: "user",
+              content: `User message:\n${safeMsg}\n\nAI-assigned category: ${ticket.category}\n\nAdmin reply:\n${safeReply}`,
+            },
+            {
+              role: "assistant",
+              content: "I will now output only the JSON verdict:",
+            },
+          ],
+          response_format: { type: "json_object" },
+        }),
+        15e3,
+        "Groq admin-reply reclassification",
+      ),
+    );
+    const jsonStr = response.choices[0]?.message?.content?.trim() || "{}";
+    let verdict = "";
+    try {
+      verdict = String(JSON.parse(jsonStr).category || "");
+    } catch {
+      return;
+    }
+    // Exact-match only (case-insensitive). No normalizeCategory fallback here:
+    // it defaults unknown strings to General Question, and we will not rewrite
+    // a real ticket's category based on a hallucinated value.
+    const newCategory = VALID_CATEGORIES.find(
+      (c) => c.toLowerCase() === verdict.toLowerCase().trim(),
+    );
+    if (!newCategory || newCategory === ticket.category) return;
+    // Category and updated_at only — never status, so this can never
+    // un-escalate, re-open, or resolve a ticket.
+    const { error: updateError } = await supabase
+      .from("tickets")
+      .update({
+        category: newCategory,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", ticket.id);
+    if (updateError) {
+      logger.error("Reclassify", "Failed to update ticket category", {
+        ticketId: ticket.id,
+        error: updateError.message,
+      });
+      return;
+    }
+    const { error: insertError } = await supabase.from("corrections").insert({
+      ticket_id: ticket.id,
+      message_text: originalMsg,
+      original_category: ticket.category,
+      correct_category: newCategory,
+      corrected_by: correctedBy || "telegram_admin",
+      correction_source: "admin_reply",
+    });
+    if (insertError) {
+      logger.error("Reclassify", "Failed to record correction", {
+        ticketId: ticket.id,
+        error: insertError.message,
+      });
+      return;
+    }
+    logger.info(
+      "Reclassify",
+      `Admin reply corrected ticket ${ticket.id}: "${ticket.category}" -> "${newCategory}"`,
+    );
+  }
   let tlClient = null;
   const targetGroup =
     process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
@@ -1119,6 +1240,18 @@ Classify the user message below. Do NOT default to General Question unless the u
                 `Admin reply attached to ticket ${parentTicket.id}`,
               );
               extractAndLearnKeywords(supabase, text).catch(() => {});
+              // Fire-and-forget: idempotent because the dedup check at the
+              // top of this function means each reply is processed once.
+              reclassifyFromAdminReply(
+                supabase,
+                parentTicket.id,
+                text,
+                senderHash,
+              ).catch((e) =>
+                logger.error("Reclassify", "Admin-reply reclassification failed", {
+                  error: e.message,
+                }),
+              );
               try {
                 await supabase.from("messages").insert({
                   telegram_message_id: String(telegramId),
@@ -1286,6 +1419,16 @@ Classify the user message below. Do NOT default to General Question unless the u
             `Unquoted admin reply attached to ticket ${parentTicket.id} (created within 90s window)`,
           );
           extractAndLearnKeywords(supabase, text).catch(() => {});
+          reclassifyFromAdminReply(
+            supabase,
+            parentTicket.id,
+            text,
+            senderHash,
+          ).catch((e) =>
+            logger.error("Reclassify", "Admin-reply reclassification failed", {
+              error: e.message,
+            }),
+          );
           try {
             await supabase.from("messages").insert({
               telegram_message_id: String(telegramId),
