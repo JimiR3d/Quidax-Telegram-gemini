@@ -1497,6 +1497,33 @@ ${lines.join("\n---\n")}`;
     const msgDateISO = msgDate
       ? new Date(msgDate * 1e3).toISOString()
       : /* @__PURE__ */ new Date().toISOString();
+    // Every non-duplicate message is persisted BEFORE any attach/drop branch
+    // below — no branch may silently erase a message (audit 2026-06-12: the
+    // quoted-user-reply branch dropped unmatched messages with no trace, and
+    // every later sweep re-dropped them identically). The 23505 handler keeps
+    // the DB UNIQUE constraint as the concurrency-safe last line of dedup.
+    const { data: dbMessage, error: msgError } = await supabase
+      .from("messages")
+      .insert({
+        telegram_message_id: String(telegramId),
+        group_id: groupId,
+        raw_text: text,
+        message_timestamp: msgDateISO,
+        ingested_at: /* @__PURE__ */ new Date().toISOString(),
+        sender_hash: senderHash,
+      })
+      .select("id")
+      .single();
+    if (msgError) {
+      if (msgError.code === "23505") {
+        logger.debug(
+          "Ingestion",
+          `Duplicate message detected for telegramId ${telegramId}`,
+        );
+        return null;
+      }
+      throw new Error(`DB Error inserting message: ${msgError.message}`);
+    }
     const isResolution =
       /\b(thanks|thank you|resolved|fixed|worked|solved|appreciate)\b/i.test(
         text,
@@ -1529,16 +1556,6 @@ ${lines.join("\n---\n")}`;
             "Ingestion",
             `User auto-resolved ticket ${parentTicket.id}`
           );
-          try {
-            await supabase.from("messages").insert({
-              telegram_message_id: String(telegramId),
-              group_id: groupId,
-              raw_text: text,
-              message_timestamp: msgDateISO,
-              ingested_at: new Date().toISOString(),
-              sender_hash: senderHash,
-            });
-          } catch (e) {}
           return parentTicket;
         }
       } catch (err) {
@@ -1607,22 +1624,6 @@ ${lines.join("\n---\n")}`;
                   error: e.message,
                 }),
               );
-              try {
-                await supabase.from("messages").insert({
-                  telegram_message_id: String(telegramId),
-                  group_id: groupId,
-                  raw_text: text,
-                  message_timestamp: msgDateISO,
-                  ingested_at: new Date().toISOString(),
-                  sender_hash: senderHash,
-                });
-              } catch (e) {
-                logger.error(
-                  "Ingestion",
-                  "Error inserting admin reply into messages",
-                  { error: e.message },
-                );
-              }
               return parentTicket;
             }
           }
@@ -1696,22 +1697,6 @@ ${lines.join("\n---\n")}`;
               "Ingestion",
               `User attached reply to ticket ${parentTicket.id}`,
             );
-            try {
-              await supabase.from("messages").insert({
-                telegram_message_id: String(telegramId),
-                group_id: groupId,
-                raw_text: text,
-                message_timestamp: msgDateISO,
-                ingested_at: new Date().toISOString(),
-                sender_hash: senderHash,
-              });
-            } catch (e) {
-              logger.error(
-                "Ingestion",
-                "Error inserting user reply into messages",
-                { error: e.message },
-              );
-            }
             return parentTicket;
           }
         } catch (err) {
@@ -1721,9 +1706,9 @@ ${lines.join("\n---\n")}`;
             { error: err.message },
           );
         }
-        logger.debug(
+        logger.info(
           "Ingestion",
-          `Ignoring general user reply to message ${replyToMsgId}`,
+          `Quoted user reply ${telegramId} (to ${replyToMsgId}) matched no active ticket - message persisted, no ticket created`,
         );
         return null;
       }
@@ -1784,22 +1769,6 @@ ${lines.join("\n---\n")}`;
               error: e.message,
             }),
           );
-          try {
-            await supabase.from("messages").insert({
-              telegram_message_id: String(telegramId),
-              group_id: groupId,
-              raw_text: text,
-              message_timestamp: msgDateISO,
-              ingested_at: new Date().toISOString(),
-              sender_hash: senderHash,
-            });
-          } catch (e) {
-            logger.error(
-              "Ingestion",
-              "Error inserting unquoted admin reply into messages",
-              { error: e.message },
-            );
-          }
           return parentTicket;
         }
         logger.debug(
@@ -1822,28 +1791,6 @@ ${lines.join("\n---\n")}`;
         "Message flagged as general chat (LLM skipped)",
         { preview: text.substring(0, 50) },
       );
-    }
-    const { data: dbMessage, error: msgError } = await supabase
-      .from("messages")
-      .insert({
-        telegram_message_id: String(telegramId),
-        group_id: groupId,
-        raw_text: text,
-        message_timestamp: msgDateISO,
-        ingested_at: /* @__PURE__ */ new Date().toISOString(),
-        sender_hash: senderHash,
-      })
-      .select("id")
-      .single();
-    if (msgError) {
-      if (msgError.code === "23505") {
-        logger.debug(
-          "Ingestion",
-          `Duplicate message detected for telegramId ${telegramId}`,
-        );
-        return null;
-      }
-      throw new Error(`DB Error inserting message: ${msgError.message}`);
     }
     const ticketInsert = {
       message_id: dbMessage.id,
@@ -2124,7 +2071,12 @@ ${lines.join("\n---\n")}`;
                     String(senderId),
                     senderUsername
                   );
-                } catch {}
+                } catch (e) {
+                  logger.warn("AutoFetch", `Skipped message ${msg.id}`, {
+                    error: e.message,
+                    preview: String(msg.text).substring(0, 50),
+                  });
+                }
                 await new Promise((r) => setTimeout(r, 2100));
               }
             } catch (err) {
