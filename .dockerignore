@@ -1,0 +1,22 @@
+# Never ship secrets or local artifacts into the image.
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+dist_temp/
+coverage/
+.git/
+.claude/
+*.log
+*.txt
+*.jsonl
+*.mjs
+*.cjs
+*.recovered
+*.recovered2
+*.reconstructed
+docs/
+tests/
+scripts/
+supabase/
