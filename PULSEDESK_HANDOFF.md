@@ -121,6 +121,7 @@
 *   PowerShell gotcha: `$env:X = ""` DELETES the variable instead of setting it empty — use the launcher script (or Git Bash `X="" command`) to blank an env var.
 
 ## 9. Suspected Broken, Untested, or Needs Verification
+*   **FULL AUDIT 2026-06-12 (evening): see KNOWN_ISSUES.md section 6 — START THERE.** Confirmed: the live GramJS listener has ingested nothing for days (AutoFetch sweeps are the only ingestion path, with silent drops, newest-first ordering corruption, and a watchdog blinded by non-group chats); quoted user messages with no matching ticket are dropped without a trace; "General Question" auto-dismissal swallows every misclassified real issue; the Raw edit/delete handlers have no group filter and have provably corrupted rows via cross-chat message-ID collisions; benchmark_cases.json never deploys (gitignored); Gemini suggested replies have been failing since ~21:34Z Jun 12. Fix order, evidence, and the approved auto-dismiss policy change are all in KNOWN_ISSUES.md section 6.
 *   **GramJS Session String Expiration:** Needs verification on how long the `TELEGRAM_SESSION_STRING` lasts before a re-auth is required.
 *   **High-Volume Concurrency:** The async ingestion handles moderate loads, but behavior under extreme spikes (e.g., thousands of messages per minute) is untested.
 *   **Rate Limit Edge Cases:** The `heavyLimiter` might trigger false positives if the Cloud Run proxy headers are misconfigured.
