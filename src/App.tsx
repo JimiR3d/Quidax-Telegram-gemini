@@ -102,6 +102,200 @@ class ErrorBoundary extends React.Component<ErrProps, ErrState> {
 }
 
 // -----------------------------------------------------------------------------
+// TRAINING VIEW (/train) — flashcard-style human review of AI classifications
+// -----------------------------------------------------------------------------
+const IS_TRAIN_ROUTE = window.location.pathname.startsWith("/train");
+
+type TrainTicket = {
+  id: string;
+  summary: string;
+  category: string;
+  urgency: string;
+  product_area: string;
+  sentiment: string;
+  status: string;
+  raw_text: string;
+  created_at: string;
+};
+
+function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: RequestInit) => Promise<Response> }) {
+  const [ticket, setTicket]             = useState<TrainTicket | null>(null);
+  const [categories, setCategories]     = useState<string[]>([]);
+  const [counts, setCounts]             = useState<{ totalTickets: number; correctionsLogged: number }>({ totalTickets: 0, correctionsLogged: 0 });
+  const [sessionReviewed, setSessionReviewed] = useState(0);
+  const [loading, setLoading]           = useState(true);
+  const [submitting, setSubmitting]     = useState(false);
+  const [wrongMode, setWrongMode]       = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [error, setError]               = useState("");
+
+  const loadNext = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    setWrongMode(false);
+    setSelectedCategory("");
+    try {
+      const res  = await apiFetch("/api/train/next");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load next ticket");
+      setCategories(data.categories || []);
+      setCounts({ totalTickets: data.totalTickets || 0, correctionsLogged: data.correctionsLogged || 0 });
+      setTicket(data.ticket);
+    } catch (e: any) {
+      if (e?.message !== "Unauthorized") setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiFetch]);
+
+  useEffect(() => { loadNext(); }, [loadNext]);
+
+  const submitVerdict = async (verdict: "correct" | "wrong") => {
+    if (!ticket || submitting) return;
+    if (verdict === "wrong" && !selectedCategory) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const res = await apiFetch("/api/train/correct", {
+        method: "POST",
+        body: JSON.stringify({
+          ticketId: ticket.id,
+          verdict,
+          ...(verdict === "wrong" ? { correctCategory: selectedCategory } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Failed to save review");
+      setSessionReviewed(n => n + 1);
+      await loadNext();
+    } catch (e: any) {
+      if (e?.message !== "Unauthorized") setError(e.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#05070a] text-white font-sans flex flex-col relative overflow-hidden">
+      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none" />
+      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
+
+      <header className="relative z-10 flex items-center justify-between px-6 py-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <CheckCircle className="w-6 h-6 text-white" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight">PULSEDESK TRAINING</h1>
+            <p className="text-[10px] text-indigo-300 font-mono tracking-widest uppercase">Teach the AI - one ticket at a time</p>
+          </div>
+        </div>
+        <a href="/" className="bg-white/5 border border-white/10 px-4 py-2 rounded-xl backdrop-blur-md hover:bg-white/10 transition text-xs font-bold text-white/60 uppercase tracking-widest">
+          ← Dashboard
+        </a>
+      </header>
+
+      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 pb-16 w-full">
+        <div className="mb-6 flex items-center gap-6 text-[11px] uppercase tracking-widest font-bold text-white/40">
+          <span><span className="text-indigo-400">{sessionReviewed}</span> reviewed this session</span>
+          <span><span className="text-emerald-400">{counts.correctionsLogged}</span> corrections logged</span>
+          <span><span className="text-white/70">{counts.totalTickets}</span> tickets total</span>
+        </div>
+
+        {error && (
+          <div className="mb-4 px-4 py-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-sm flex items-center">
+            <AlertTriangle className="w-4 h-4 mr-2 shrink-0" />{error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="p-12 flex justify-center"><div className="animate-spin text-indigo-500"><RefreshCcw /></div></div>
+        ) : !ticket ? (
+          <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-12 max-w-xl w-full text-center">
+            <CheckCircle className="w-12 h-12 text-emerald-400 mx-auto mb-4" />
+            <h2 className="text-xl font-bold mb-2">All caught up</h2>
+            <p className="text-sm text-white/50">Every classified ticket has been reviewed. New tickets will appear here as they come in.</p>
+          </div>
+        ) : (
+          <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl max-w-xl w-full overflow-hidden">
+            <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full ${URGENCY_COLORS[ticket.urgency] || "bg-zinc-500"}`} />
+                <span className="text-xs font-bold uppercase tracking-widest text-white/50">{ticket.urgency} · {ticket.status}</span>
+              </div>
+              <span className="text-xs text-white/30">{(() => { try { return format(parseISO(ticket.created_at), "MMM d, HH:mm"); } catch { return ticket.created_at; } })()}</span>
+            </div>
+
+            <div className="p-6">
+              <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2">User message</p>
+              <p className="text-sm text-white/90 whitespace-pre-wrap bg-white/5 border border-white/10 rounded-xl p-4 mb-5 max-h-56 overflow-y-auto">{ticket.raw_text}</p>
+
+              <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2">AI classified this as</p>
+              <div className="inline-flex items-center px-4 py-2 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-bold text-sm mb-6">
+                {ticket.category}
+              </div>
+
+              {!wrongMode ? (
+                <div className="flex gap-3">
+                  <button
+                    id="train-correct"
+                    onClick={() => submitVerdict("correct")}
+                    disabled={submitting}
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-emerald-500/20"
+                  >
+                    {submitting ? "Saving..." : "✓ Correct"}
+                  </button>
+                  <button
+                    id="train-wrong"
+                    onClick={() => setWrongMode(true)}
+                    disabled={submitting}
+                    className="flex-1 bg-rose-500/80 hover:bg-rose-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-rose-500/20"
+                  >
+                    ✗ Wrong — fix it
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">What is the correct category?</p>
+                  <select
+                    id="train-category-select"
+                    value={selectedCategory}
+                    onChange={e => setSelectedCategory(e.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-indigo-500 [&>option]:text-black"
+                  >
+                    <option value="">Select a category...</option>
+                    {categories.filter(c => c !== ticket.category).map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                  <div className="flex gap-3">
+                    <button
+                      id="train-save-correction"
+                      onClick={() => submitVerdict("wrong")}
+                      disabled={submitting || !selectedCategory}
+                      className="flex-1 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-indigo-500/20"
+                    >
+                      {submitting ? "Saving..." : "Save correction"}
+                    </button>
+                    <button
+                      onClick={() => { setWrongMode(false); setSelectedCategory(""); }}
+                      disabled={submitting}
+                      className="px-5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/60 font-bold rounded-xl py-3 text-sm transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
 // MAIN APP
 // -----------------------------------------------------------------------------
 export default function App() {
@@ -344,7 +538,8 @@ export default function App() {
   }, [apiFetch, selectedCommunity, filterStatus, filterCategory, currentPage, itemsPerPage, showIssuesOnly, urgencyFilter, filterDays, filterStartDate, filterEndDate, searchQuery]);
 
   useEffect(() => {
-    if (!isAuthenticated) return;
+    // The /train view manages its own data — don't run dashboard polling there
+    if (!isAuthenticated || IS_TRAIN_ROUTE) return;
     fetchTickets();
     // Use a fixed interval without recreating it on every render unless auth changes
     const interval = setInterval(() => {
@@ -559,6 +754,13 @@ export default function App() {
         </form>
       </div>
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // RENDER: Training view (/train) — separate from the main dashboard
+  // -------------------------------------------------------------------------
+  if (IS_TRAIN_ROUTE) {
+    return <TrainView apiFetch={apiFetch} />;
   }
 
   // -------------------------------------------------------------------------

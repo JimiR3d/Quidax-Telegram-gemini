@@ -2604,6 +2604,144 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
     }
   });
 
+  // Milestone 3: human training interface (/train route).
+  // "Reviewed" means the ticket has at least one corrections row — a
+  // human-confirmed classification is stored as original = correct.
+  app.get("/api/train/next", requireAuth, async (_req, res) => {
+    try {
+      const supabase = getSupabase();
+      const PAGE = 50;
+      let nextTicket = null;
+      for (let page = 0; page < 20 && !nextTicket; page++) {
+        const { data: batch, error } = await supabase
+          .from("tickets")
+          .select(
+            "id, summary, category, urgency, product_area, sentiment, status, raw_text, created_at",
+          )
+          .eq("is_admin_message", false)
+          .neq("summary", "Processing message...")
+          .order("created_at", { ascending: false })
+          .range(page * PAGE, page * PAGE + PAGE - 1);
+        if (error) throw new Error(error.message);
+        if (!batch || batch.length === 0) break;
+        const { data: reviewed, error: corrError } = await supabase
+          .from("corrections")
+          .select("ticket_id")
+          .in(
+            "ticket_id",
+            batch.map((t) => t.id),
+          );
+        if (corrError) throw new Error(corrError.message);
+        const reviewedSet = new Set((reviewed || []).map((r) => r.ticket_id));
+        nextTicket = batch.find((t) => !reviewedSet.has(t.id)) || null;
+        if (batch.length < PAGE) break;
+      }
+      const { count: totalTickets } = await supabase
+        .from("tickets")
+        .select("id", { count: "exact", head: true })
+        .eq("is_admin_message", false)
+        .neq("summary", "Processing message...");
+      const { count: correctionsLogged } = await supabase
+        .from("corrections")
+        .select("id", { count: "exact", head: true });
+      return res.json({
+        ticket: nextTicket
+          ? {
+              ...nextTicket,
+              // show the clean original message, not appended reply blocks
+              raw_text: originalMessageText(nextTicket.raw_text),
+            }
+          : null,
+        categories: VALID_CATEGORIES,
+        totalTickets: totalTickets ?? 0,
+        correctionsLogged: correctionsLogged ?? 0,
+      });
+    } catch (e) {
+      logger.error("API", `GET /api/train/next error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
+
+  const TrainCorrectSchema = z.object({
+    ticketId: z.string().uuid(),
+    verdict: z.enum(["correct", "wrong"]),
+    correctCategory: z.enum(VALID_CATEGORIES).optional(),
+  });
+  app.post("/api/train/correct", requireAuth, async (req, res) => {
+    try {
+      const parsed = TrainCorrectSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body" });
+      }
+      const { ticketId, verdict, correctCategory } = parsed.data;
+      if (verdict === "wrong" && !correctCategory) {
+        return res
+          .status(400)
+          .json({ error: "correctCategory is required when verdict is wrong" });
+      }
+      const supabase = getSupabase();
+      const { data: ticket } = await supabase
+        .from("tickets")
+        .select("id, category, raw_text, is_admin_message")
+        .eq("id", ticketId)
+        .maybeSingle();
+      if (!ticket || ticket.is_admin_message) {
+        return res.status(404).json({ error: "Ticket not found" });
+      }
+      // Double-submit guard: one human review per ticket.
+      const { data: existing } = await supabase
+        .from("corrections")
+        .select("id")
+        .eq("ticket_id", ticketId)
+        .eq("correction_source", "human_ui")
+        .limit(1);
+      if (existing && existing.length > 0) {
+        return res.json({ success: true, alreadyReviewed: true });
+      }
+      const finalCategory =
+        verdict === "correct" ? ticket.category : correctCategory;
+      const { error: insertError } = await supabase.from("corrections").insert({
+        ticket_id: ticket.id,
+        message_text: originalMessageText(ticket.raw_text),
+        original_category: ticket.category,
+        correct_category: finalCategory,
+        corrected_by: req.user.userId || "dashboard_admin",
+        correction_source: "human_ui",
+      });
+      if (insertError) throw new Error(insertError.message);
+      if (verdict === "wrong" && finalCategory !== ticket.category) {
+        const { error: updateError } = await supabase
+          .from("tickets")
+          .update({
+            category: finalCategory,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", ticket.id);
+        if (updateError) throw new Error(updateError.message);
+        logAuditAction(
+          supabase,
+          req.user.userId || "dashboard_admin",
+          "ticket.category_corrected",
+          ticket.id,
+          { category: ticket.category },
+          { category: finalCategory },
+          req.ip,
+        );
+      }
+      logger.info(
+        "Training",
+        `Human review for ticket ${ticket.id}: ${verdict}` +
+          (verdict === "wrong"
+            ? ` ("${ticket.category}" -> "${finalCategory}")`
+            : ""),
+      );
+      return res.json({ success: true, corrected: verdict === "wrong" });
+    } catch (e) {
+      logger.error("API", `POST /api/train/correct error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
+
   let backfillProgress = {
     running: false,
     total: 0,
