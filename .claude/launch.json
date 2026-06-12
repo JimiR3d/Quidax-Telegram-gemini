@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pulsedesk-local",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "scripts/dev-no-telegram.mjs"],
+      "port": 3100,
+      "autoPort": true
+    }
+  ]
+}

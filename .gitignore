@@ -24,3 +24,6 @@ history_summary.json
 test*.js
 fix*.js
 check*.py
+
+# Claude Code local-only settings (personal permission allowlist)
+.claude/settings.local.json
