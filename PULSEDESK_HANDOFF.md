@@ -89,11 +89,33 @@
 *   Every dashboard filter (search, category, urgency, date, custom range) updates the KPI cards together with the table (verified 2026-06-11 against a UTC server).
 *   Unquoted admin replies attach to the right ticket via the 90-second window heuristic and mark it "In Review" (verified end-to-end 2026-06-11).
 *   Production build artifact verified locally (2026-06-11): `npm run build` then `node dist/server.mjs` boots, connects to Telegram, and answers `/api/health` ok — this is exactly what Railway runs per `railway.toml`.
+*   **Milestone 2 (2026-06-12): 4-state resolution workflow + Avg Response Time.** Statuses are now Open / In Review / Escalated / Awaiting User / Resolved / Dismissed (DB CHECK constraint widened, migration 009). Workflow rules: admin reply moves Open → In Review but never un-escalates (Escalated / Awaiting User keep their state); a user reply to an Awaiting User ticket flips it back to In Review; all four active states accept replies and count as Active in the resolution rate. New `first_admin_reply_at` column is stamped once per ticket (with the reply message's own timestamp) by both admin-reply paths; the dashboard has a new Avg Response Time KPI card (legacy tickets are null and excluded). The stats payload gained `inReviewCount`, real `escalatedCount`, `awaitingUserCount`, `avgResponseMs`, `respondedCount` — the "In Review" card previously read a field misleadingly named `escalatedCount`. `/api/ingest` (super_admin) now also accepts `replyToMsgId` for simulating quoted reply threads. Everything verified end-to-end on a local server against the live DB (status round-trips, both reply paths, re-ingest idempotency, 23s measured avg response) and all test data deleted afterwards.
 
-## 8b. Deployment (Railway)
+## 8b. Deployment (Railway — being replaced by Fly.io)
+*   **Production URL: `https://quidax-telegram-gemini-production.up.railway.app/`** (verified healthy 2026-06-12: `/api/health` returned ok, `telegramConnected: true`, all circuit breakers closed).
 *   `railway.toml` at the repo root: builds with `npm run build`, starts with `node dist/server.mjs` (NOT `npm start` — that script contains a Windows-only `chcp` command), health check `/api/health` (5-min timeout for Telegram connect), `numReplicas = 1` pinned because each replica would open its own GramJS session and double-ingest.
 *   Railway injects `PORT` automatically — never set it manually.
 *   Env vars to set in the Railway dashboard (values from local `.env`): `GROQ_API_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DASHBOARD_PASSWORD`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_STRING`, `TELEGRAM_GROUP_USERNAME`, `TELEGRAM_ADMIN_USER_IDS`, `NODE_ENV=production`, `DEMO_MODE=false`; optional: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `HEARTBEAT_URL`, `SUPPORT_API_KEY`.
+*   Migration reason (2026-06-12): Railway's free tier is a $5/month credit (~16 days of runtime); Fly.io is the replacement target. `railway.toml` stays in the repo as a backup config.
+
+## 8c. Deployment (Fly.io — migration target, 2026-06-12)
+*   Config: `fly.toml` + `Dockerfile` + `.dockerignore` at the repo root. App name `quidax-pulsedesk`, region `lhr`, one shared-cpu-1x machine with 512MB RAM.
+*   **Only ONE platform may run at a time.** Two live deployments = two GramJS sessions = every message double-ingested (the dedup check is not concurrency-safe). Take Railway down BEFORE `fly deploy`; the startup AutoFetch (2-hour lookback) back-fills any messages missed during the switchover gap.
+*   Single-instance guarantees: deploy with `--ha=false` (otherwise Fly creates 2 machines by default), `auto_stop_machines = "off"` + `min_machines_running = 1` (Fly must never suspend the Telegram listener), `strategy = "rolling"` (old machine stops before the new one starts on redeploys).
+*   Fly does NOT inject `PORT`; `fly.toml` sets `PORT=8080` to match `internal_port`.
+*   Secrets are set via `fly secrets set` (same list as the Railway env vars above, minus `NODE_ENV`/`PORT` which live in `fly.toml [env]`). The `Dockerfile` never copies `.env` (`.dockerignore` blocks it).
+*   Deploy steps: see the step-by-step commands in section 8d below.
+
+## 8d. Fly.io deploy commands (run from the repo root)
+1.  Install the CLI (PowerShell): `iwr https://fly.io/install.ps1 -useb | iex` — then restart the terminal so `fly` is on PATH.
+2.  `fly auth login` (opens browser).
+3.  `fly apps create quidax-pulsedesk` — app names are global; if taken, pick another and update `app =` in `fly.toml`.
+4.  Set secrets (values from local `.env`; quote the long session string):
+    `fly secrets set GROQ_API_KEY="..." GEMINI_API_KEY="..." SUPABASE_URL="..." SUPABASE_SERVICE_ROLE_KEY="..." DASHBOARD_PASSWORD="..." TELEGRAM_API_ID="..." TELEGRAM_API_HASH="..." TELEGRAM_SESSION_STRING="..." TELEGRAM_GROUP_USERNAME="..." TELEGRAM_ADMIN_USER_IDS="..." DEMO_MODE="false"`
+5.  **Stop Railway now** (dashboard → service → Settings → Remove service, or scale to 0). Do not skip — see the one-platform rule above.
+6.  `fly deploy --ha=false` (first build takes a few minutes).
+7.  Verify: `fly status` (expect 1 machine, started), then `curl https://quidax-pulsedesk.fly.dev/api/health` — expect `"telegramConnected":true` (may take up to ~5 min after boot).
+8.  Watch logs during first connect: `fly logs`.
 
 ## 9. Suspected Broken, Untested, or Needs Verification
 *   **GramJS Session String Expiration:** Needs verification on how long the `TELEGRAM_SESSION_STRING` lasts before a re-auth is required.
