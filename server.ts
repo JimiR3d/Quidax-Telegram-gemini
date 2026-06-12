@@ -1254,6 +1254,187 @@ ${lines.join("\n---\n")}`;
   const targetGroup =
     process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
   let lastMessageReceivedAt = Date.now();
+  // ── Milestone 5: Automated Status Update Bot ──────────────────────────────
+  // When an admin changes a ticket status in the dashboard, post an empathetic
+  // reply to the user's original message in the Telegram group. This is the
+  // ONLY code path that writes to the group, and it ships behind two flags:
+  //   BOT_REPLIES_ENABLED — kill switch; unset/false = feature fully off.
+  //   BOT_REPLIES_DRY_RUN — defaults TRUE; the full eligibility pipeline runs
+  //                         and records an audit row, but Telegram is never
+  //                         called. Flip to "false" only after reviewing
+  //                         production dry-run logs.
+  // Templates are deterministic constants — no LLM output is ever posted.
+  const BOT_REPLIES_ENABLED = process.env.BOT_REPLIES_ENABLED === "true";
+  const BOT_REPLIES_DRY_RUN = process.env.BOT_REPLIES_DRY_RUN !== "false";
+  const BOT_REPLY_TEMPLATES = {
+    Resolved:
+      "Hi 👋 Good news — this issue has now been resolved. Please check and confirm everything is working on your end. If anything still looks off, just reply here and we'll take another look. Thank you for your patience! 🙏",
+    Escalated:
+      "Hi 👋 A quick update — your issue has been escalated to our specialist team for priority attention. We'll follow up here as soon as there's progress. Thank you for bearing with us.",
+    "Awaiting User":
+      "Hi 👋 We need a little more information from you to continue looking into this. Please reply to this message with more details — for example what you tried and any error message you saw. We'll pick it up as soon as we hear back. Thank you!",
+  };
+  const BOT_REPLY_MAX_TICKET_AGE_DAYS = 7;
+  const BOT_REPLY_MIN_GAP_MS = 5e3;
+  const BOT_REPLY_MAX_PER_HOUR = 20;
+  // Rolling-hour send timestamps. Dry-run consumes the limiter too, so dry-run
+  // is a faithful rehearsal of live behavior (state resets on restart, and
+  // changing the env flags restarts the process anyway).
+  let botReplySendTimes: number[] = [];
+  // Telegram ids of messages WE sent. The live listener and AutoFetch must
+  // never re-ingest our own replies — they would register as admin replies
+  // (append an [ADMIN_REPLY] block, stamp first_admin_reply_at, fire the Groq
+  // reclassification audit on template text) and corrupt the Avg Response
+  // Time KPI. Seeded from the last 24h of bot_replies so restarts are covered
+  // (AutoFetch only looks back 2 hours).
+  const botSentMessageIds = new Set<string>();
+  (async () => {
+    try {
+      const supabase = getSupabase();
+      const { data } = await supabase
+        .from("bot_replies")
+        .select("sent_telegram_message_id")
+        .not("sent_telegram_message_id", "is", null)
+        .gte(
+          "created_at",
+          new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString(),
+        );
+      for (const row of data || [])
+        botSentMessageIds.add(String(row.sent_telegram_message_id));
+      if (data?.length) {
+        logger.info(
+          "BotReply",
+          `Seeded ${data.length} own-message id(s) for the ingestion guard`,
+        );
+      }
+    } catch (e) {
+      logger.warn("BotReply", "Failed to seed own-message ingestion guard", {
+        error: e.message,
+      });
+    }
+  })();
+  function botReplyRateLimitOk(now) {
+    botReplySendTimes = botReplySendTimes.filter(
+      (t) => now - t < 60 * 60 * 1e3,
+    );
+    if (botReplySendTimes.length >= BOT_REPLY_MAX_PER_HOUR) return false;
+    const last = botReplySendTimes[botReplySendTimes.length - 1];
+    if (last !== void 0 && now - last < BOT_REPLY_MIN_GAP_MS) return false;
+    return true;
+  }
+  // Fire-and-forget from the dashboard status endpoint — the ONLY trigger.
+  // Ingestion-driven status changes (user auto-resolve, Telegram delete
+  // handler, admin-message insert) deliberately never post to the group.
+  // Every skip logs its reason so dry-run output is reviewable.
+  async function maybeSendStatusBotReply(supabase, oldTicket, newStatus, user) {
+    if (!BOT_REPLIES_ENABLED) return; // kill switch: fully silent
+    const ticketId = oldTicket.id;
+    const skip = (reason) =>
+      logger.info(
+        "BotReply",
+        `Skipped ticket ${ticketId} → ${newStatus}: ${reason}`,
+      );
+    const template = BOT_REPLY_TEMPLATES[newStatus];
+    if (!template) return skip("status does not notify users");
+    if (oldTicket.status === newStatus) return skip("status unchanged");
+    if (!oldTicket.telegram_message_id)
+      return skip("ticket has no Telegram message id");
+    // Hard rail: never post anywhere except the configured target group.
+    if (oldTicket.group_id !== targetGroup)
+      return skip(
+        `ticket group "${oldTicket.group_id}" is not the configured target group`,
+      );
+    if (oldTicket.is_admin_message) return skip("admin-authored ticket");
+    const ageMs = Date.now() - new Date(oldTicket.created_at).getTime();
+    if (ageMs > BOT_REPLY_MAX_TICKET_AGE_DAYS * 24 * 60 * 60 * 1e3)
+      return skip(`ticket older than ${BOT_REPLY_MAX_TICKET_AGE_DAYS} days`);
+    const now = Date.now();
+    if (!botReplyRateLimitOk(now))
+      return skip(
+        `rate limit reached (min ${BOT_REPLY_MIN_GAP_MS / 1e3}s gap, max ${BOT_REPLY_MAX_PER_HOUR}/hour)`,
+      );
+    const baseRow = {
+      ticket_id: ticketId,
+      status: newStatus,
+      message_text: template,
+      replied_to_telegram_message_id: String(oldTicket.telegram_message_id),
+      group_id: oldTicket.group_id,
+      triggered_by: user?.userId || null,
+    };
+    if (BOT_REPLIES_DRY_RUN) {
+      // Predict exactly what live mode would do right now: any live row for
+      // this (ticket, status) — sent, failed, or pending — would block it.
+      const { data: liveRow } = await supabase
+        .from("bot_replies")
+        .select("id, result")
+        .eq("ticket_id", ticketId)
+        .eq("status", newStatus)
+        .eq("dry_run", false)
+        .maybeSingle();
+      if (liveRow)
+        return skip(
+          `already replied for this status (live row: ${liveRow.result})`,
+        );
+      botReplySendTimes.push(now);
+      await supabase
+        .from("bot_replies")
+        .insert({ ...baseRow, dry_run: true, result: "dry_run" });
+      logger.info(
+        "BotReply",
+        `DRY RUN — WOULD reply to message ${oldTicket.telegram_message_id} in ${oldTicket.group_id} for ticket ${ticketId} (${newStatus}): "${template}"`,
+      );
+      return;
+    }
+    // Live mode: claim BEFORE sending. The partial unique index on
+    // (ticket_id, status) WHERE dry_run = false makes the claim atomic — a
+    // racing duplicate gets 23505 and skips. A failed send keeps its row and
+    // is deliberately never auto-retried (v1 decision).
+    const { data: claim, error: claimErr } = await supabase
+      .from("bot_replies")
+      .insert({ ...baseRow, dry_run: false, result: "pending" })
+      .select("id")
+      .single();
+    if (claimErr) {
+      if (claimErr.code === "23505")
+        return skip("already replied for this status");
+      throw new Error(`bot_replies claim insert failed: ${claimErr.message}`);
+    }
+    botReplySendTimes.push(now);
+    try {
+      if (!tlClient) throw new Error("Telegram client is not connected");
+      const sent = await withTimeout(
+        tlClient.sendMessage(oldTicket.group_id, {
+          message: template,
+          replyTo: Number(oldTicket.telegram_message_id),
+        }),
+        15e3,
+        "Telegram sendMessage",
+      );
+      const sentId = sent?.id ? Number(sent.id) : null;
+      if (sentId) botSentMessageIds.add(String(sentId));
+      await supabase
+        .from("bot_replies")
+        .update({ result: "sent", sent_telegram_message_id: sentId })
+        .eq("id", claim.id);
+      logger.info(
+        "BotReply",
+        `Sent status reply (msg ${sentId}) for ticket ${ticketId} → ${newStatus}, threaded to message ${oldTicket.telegram_message_id}`,
+      );
+    } catch (e) {
+      await supabase
+        .from("bot_replies")
+        .update({
+          result: "failed",
+          error: String(e.message).slice(0, 500),
+        })
+        .eq("id", claim.id);
+      logger.error(
+        "BotReply",
+        `Send FAILED for ticket ${ticketId} → ${newStatus} (no auto-retry)`,
+        { error: e.message },
+      );
+    }
+  }
   async function processAndIngestMessage(
     text,
     telegramId,
@@ -1284,6 +1465,17 @@ ${lines.join("\n---\n")}`;
     });
     if (!text || text.length < 5) {
       throw new Error("Message too short or empty");
+    }
+    // Milestone 5: never re-ingest our own status-update replies. They never
+    // enter `messages`, so the dedup check below cannot catch them — without
+    // this guard they would register as admin replies (ADMIN_REPLY block,
+    // first_admin_reply_at stamp, Groq reclassification on template text).
+    if (telegramId && botSentMessageIds.has(String(telegramId))) {
+      logger.debug(
+        "BotReply",
+        `Skipping our own outbound message ${telegramId}`,
+      );
+      return null;
     }
     const supabase = getSupabase();
     if (telegramId && !String(telegramId).startsWith("rand_")) {
@@ -2421,6 +2613,16 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         { status: oldTicket.status },
         { status },
         req.ip || "unknown",
+      );
+      // Milestone 5: a dashboard status change may notify the user in the
+      // Telegram thread. Fire-and-forget — the dashboard response never
+      // waits on (or fails because of) Telegram.
+      maybeSendStatusBotReply(supabase, oldTicket, status, user).catch((e) =>
+        logger.error(
+          "BotReply",
+          `Unexpected error handling ticket ${ticketId} → ${status}`,
+          { error: e.message },
+        ),
       );
       res.json({ success: true });
     } catch (e) {
