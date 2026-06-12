@@ -13,7 +13,8 @@ Quidax (a leading Nigerian crypto exchange) manages highly active Telegram commu
 ## 4. Current State
 *   **What Works:** Live Telegram listening, Groq-based LLaMA classification, Gemini suggested replies, Supabase storage, and the React dashboard polling system. As of 2026-06-11: message re-processing is idempotent (admin/user replies no longer duplicate); all KPI cards are verified honest — Resolution Rate = Resolved ÷ (Resolved + Active) with Dismissed spam excluded, real `resolved_at` timestamps, Lagos-timezone day boundaries; every dashboard filter (search/category/urgency/date/custom range) updates the KPI cards together with the table; unquoted admin replies attach to the right ticket via a 90-second window heuristic; Railway deployment config (`railway.toml`) is in place and the production bundle is verified to boot.
 *   **What Does Not:** Deep, nuanced categorization of Nigerian slang or highly specific crypto edge-cases; long-term session persistence for GramJS under load-balancer constraints; unquoted admin replies arriving more than 90 seconds after the ticket (or when several tickets land in the same 90s window) still cannot be matched reliably.
-*   **What is Missing:** Robust human-in-the-loop training interfaces, automated Telegram thread replies, and granular sub-categories. As of 2026-06-12 the resolution workflow has four active states (Open / In Review / Escalated / Awaiting User) and the dashboard shows an Avg Response Time KPI fed by the new `first_admin_reply_at` column (tracked for tickets from 2026-06-12 onward; legacy tickets are excluded rather than guessed).
+*   **What is Missing:** Automated Telegram thread replies and granular sub-categories. As of 2026-06-12 the resolution workflow has four active states (Open / In Review / Escalated / Awaiting User) and the dashboard shows an Avg Response Time KPI fed by the new `first_admin_reply_at` column (tracked for tickets from 2026-06-12 onward; legacy tickets are excluded rather than guessed).
+*   **Milestone 3 shipped (2026-06-12) — The Human Loop:** a `corrections` table records every human fix or confirmation of an AI classification; admin replies in Telegram that contradict the assigned category silently fix the ticket and log a correction; every new classification is primed with the 5 most similar past corrections (few-shot learning, verified to flip a repeat misclassification after one correction); and a flashcard-style /train page lets admins review unreviewed tickets one at a time. Still missing from Feature 2's acceptance criteria: the "Verify" function that re-runs the AI on corrected tickets to measure accuracy improvement.
 
 ## 5. Core Features
 
@@ -62,9 +63,10 @@ Quidax (a leading Nigerian crypto exchange) manages highly active Telegram commu
 *   **Priority:** Critical
 
 ## 6. Implementation Phases
-*   **Milestone 1 (Foundation):** Lock in the Improved Category System (Feature 1) and establish the PR-Based Workflow (Feature 5).
-*   **Milestone 2 (Automation):** Implement the Automated Status Update Bot (Feature 4).
-*   **Milestone 3 (The Human Loop):** Build the Human Feedback interface (Feature 2) and Admin Reply Learning (Feature 3).
+*   **Milestone 1 (Foundation):** Lock in the Improved Category System (Feature 1) and establish the PR-Based Workflow (Feature 5). — **DONE (2026-06-11)**
+*   **Milestone 2 (Automation):** Four-state resolution workflow + Avg Response Time KPI. — **DONE (2026-06-12)**
+*   **Milestone 3 (The Human Loop):** Build the Human Feedback interface (Feature 2) and Admin Reply Learning (Feature 3). — **DONE (2026-06-12)**, except Feature 2's "Verify" accuracy-measurement function (carried to Milestone 4).
+*   **Milestone 4 (Hardening, proposed):** the "Verify" accuracy function, DB-side KPI aggregation (the 5,000-row stats cap), Gemini suggested-reply retry/backoff, the Automated Status Update Bot (Feature 4), and the async classification race fix.
 
 ## 7. Definition of Done
 Fully production-ready means the system can ingest 10,000 messages a day without crashing, categorizes with 90%+ accuracy (post-human-training), never exposes secrets, and allows agents to resolve tickets directly from a polished, bug-free dashboard.
