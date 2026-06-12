@@ -708,7 +708,9 @@ async function startServer() {
     max: 20,
     message: { error: "Too many login attempts. Please try again later." },
   });
-  const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "quidax2026";
+  // No fallback: DASHBOARD_PASSWORD is in REQUIRED_ENV_VARS — the process
+  // exits at startup if it is missing, so this is guaranteed non-empty here.
+  const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
   const SUPPORT_GROUP_ID =
     process.env.SUPPORT_GROUP_ID || "OfficialQuidaxCommunity";
   function timingSafeStringCompare(a, b) {
