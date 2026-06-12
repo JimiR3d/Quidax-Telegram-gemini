@@ -10,6 +10,10 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
+import {
+  extractUpdateChannelId,
+  updateTargetsChannel,
+} from "./telegram-guards";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -2038,6 +2042,34 @@ ${lines.join("\n---\n")}`;
             () => refreshLearnedKeywords(getSupabase()),
             10 * 60 * 1e3,
           );
+          // The numeric channel id of the target group, used to reject
+          // edit/delete updates from every other chat (message ids are only
+          // unique per chat — see telegram-guards.ts). Resolution is retried
+          // at most once a minute; while unresolved, edit/delete handling
+          // fails safe (skips).
+          let targetChannelId: string | null = null;
+          let lastChannelIdAttempt = 0;
+          const resolveTargetChannelId = async () => {
+            if (targetChannelId) return targetChannelId;
+            if (Date.now() - lastChannelIdAttempt < 60 * 1e3) return null;
+            lastChannelIdAttempt = Date.now();
+            try {
+              const entity = await client.getEntity(targetGroup);
+              targetChannelId = String((entity as any).id);
+              logger.info(
+                "Telegram",
+                `Resolved target group ${targetGroup} to channel id ${targetChannelId}`,
+              );
+            } catch (e) {
+              logger.warn(
+                "Telegram",
+                "Could not resolve target group channel id - edit/delete updates are skipped until it resolves",
+                { error: e.message },
+              );
+            }
+            return targetChannelId;
+          };
+          resolveTargetChannelId();
           const runAutoFetch = async () => {
             try {
               logger.info(
@@ -2134,10 +2166,28 @@ ${lines.join("\n---\n")}`;
           }, new NewMessage({}));
           const { Raw } = await import("telegram/events/index.js");
           client.addEventHandler(async (update) => {
+            // Only supergroup/channel edit & delete updates can be matched to
+            // the target group; the DM/basic-group variants (UpdateEditMessage,
+            // UpdateDeleteMessages) carry no matchable chat id and are never
+            // for our group (it is a public supergroup) — ignore them.
             if (
-              update.className === "UpdateEditMessage" ||
-              update.className === "UpdateEditChannelMessage"
+              update.className !== "UpdateEditChannelMessage" &&
+              update.className !== "UpdateDeleteChannelMessages"
             ) {
+              return;
+            }
+            if (!updateTargetsChannel(update, await resolveTargetChannelId())) {
+              logger.debug(
+                "Telegram",
+                "Ignoring edit/delete update from another chat",
+                {
+                  className: update.className,
+                  channelId: extractUpdateChannelId(update),
+                },
+              );
+              return;
+            }
+            if (update.className === "UpdateEditChannelMessage") {
               const msg = update.message;
               if (!msg || !msg.id || !msg.message) return;
               try {
@@ -2167,10 +2217,7 @@ ${lines.join("\n---\n")}`;
                 });
               }
             }
-            if (
-              update.className === "UpdateDeleteMessages" ||
-              update.className === "UpdateDeleteChannelMessages"
-            ) {
+            if (update.className === "UpdateDeleteChannelMessages") {
               const deletedIds = update.messages || [];
               if (!deletedIds.length) return;
               try {
