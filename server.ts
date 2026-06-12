@@ -188,6 +188,22 @@ var PII_PATTERNS = [
     "[CARD_REDACTED]",
   ],
 ];
+// Retry policy for LLM calls: only 429s and 5xx (capacity/transient) errors
+// are worth retrying — a 4xx means the request itself is wrong and will fail
+// identically on every attempt. A breaker-open fast-fail is never retried;
+// the breaker exists precisely to stop us hammering a struggling upstream.
+function isRetryableLLMError(e) {
+  const msg = String(e?.message || "");
+  if (msg.includes("[CircuitBreaker]")) return false;
+  const status = e?.status ?? e?.response?.status;
+  if (status === 429 || (status >= 500 && status < 600)) return true;
+  // The Gemini SDK often buries the status in the message text, e.g.
+  // "[503 Service Unavailable] The model is currently experiencing high demand".
+  // Our own withTimeout wrapper throws "[Timeout] <label> exceeded Nms".
+  return /\[?(429|500|502|503|504)[\s\]]|overloaded|high demand|service unavailable|resource exhausted|timeout|timed out/i.test(
+    msg,
+  );
+}
 function redactPII(text) {
   let result = text;
   for (const [pattern, replacement] of PII_PATTERNS) {
@@ -858,8 +874,8 @@ async function checkIsAdmin(groupId, senderId, senderUsername = "") {
 };
   async function generateSuggestedReply(text, classification) {
     if (!genAI) return "";
-    return geminiBreaker
-      .call(() =>
+    const attemptOnce = () =>
+      geminiBreaker.call(() =>
         withTimeout(
           (async () => {
             const model = genAI.getGenerativeModel({
@@ -885,14 +901,90 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
           1e4,
           "Gemini generateSuggestedReply",
         ),
-      )
-      .catch((e) => {
-        logger.error("Gemini", "generateSuggestedReply failed", {
-          error: e.message,
-        });
-        return "";
-      });
+      );
+    // Milestone 4: Gemini intermittently 503s under load ("high demand"),
+    // which used to permanently strip the ticket of a suggested reply. Retry
+    // capacity errors with exponential backoff + jitter; each attempt is its
+    // own breaker call so the circuit still opens under sustained failure
+    // (and a breaker-open fast-fail stops the retries immediately).
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await attemptOnce();
+      } catch (e) {
+        const willRetry = attempt < MAX_ATTEMPTS && isRetryableLLMError(e);
+        logger[willRetry ? "warn" : "error"](
+          "Gemini",
+          `generateSuggestedReply attempt ${attempt}/${MAX_ATTEMPTS} failed${willRetry ? " - retrying with backoff" : ""}`,
+          { error: e.message },
+        );
+        if (!willRetry) return "";
+        const backoffMs = 1e3 * 2 ** (attempt - 1) + Math.random() * 500;
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+    }
+    return "";
   }
+  // Milestone 4 backstop: even with retries, a sustained Gemini outage can
+  // outlive all attempts. Every 15 minutes, find recent ACTIVE tickets that
+  // are classified but still have no suggested reply and regenerate it, so
+  // "missing suggested reply" is a 15-minute condition, never a permanent
+  // one. Bounded tight: last 24h, active statuses only, max 10 per sweep —
+  // verified against the live DB that historical tickets (661 with null
+  // replies, all resolved/dismissed/old) are untouched.
+  async function repairMissingSuggestedReplies() {
+    try {
+      if (!genAI) return;
+      const supabase = getSupabase();
+      const cutoffISO = new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString();
+      const { data: rows, error } = await supabase
+        .from("tickets")
+        .select("id, raw_text, category, urgency, suggested_action")
+        .is("suggested_reply", null)
+        .eq("is_admin_message", false)
+        .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
+        .gte("created_at", cutoffISO)
+        .not("summary", "in", '("Processing message...","General Chat","Classification failed - manual review needed.")')
+        .order("created_at", { ascending: false })
+        .limit(10);
+      if (error) {
+        logger.warn("ReplyRepair", "Sweep query failed", { error: error.message });
+        return;
+      }
+      if (!rows || rows.length === 0) return;
+      logger.info(
+        "ReplyRepair",
+        `${rows.length} recent ticket(s) missing a suggested reply - regenerating`,
+      );
+      for (const t of rows) {
+        const originalMsg = originalMessageText(t.raw_text);
+        if (!originalMsg) continue;
+        const reply = await generateSuggestedReply(originalMsg, {
+          category: t.category,
+          urgency: t.urgency,
+          suggested_action: t.suggested_action,
+        });
+        if (reply) {
+          // Guarded on still-null so a reply an agent saved in the meantime
+          // is never overwritten.
+          await supabase
+            .from("tickets")
+            .update({
+              suggested_reply: reply,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", t.id)
+            .is("suggested_reply", null);
+          logger.info("ReplyRepair", `Backfilled suggested reply for ticket ${t.id}`);
+        }
+        await new Promise((r) => setTimeout(r, 2100));
+      }
+    } catch (e) {
+      logger.warn("ReplyRepair", "Sweep failed", { error: e.message });
+    }
+  }
+  setTimeout(repairMissingSuggestedReplies, 2 * 60 * 1e3);
+  setInterval(repairMissingSuggestedReplies, 15 * 60 * 1e3);
   const GROQ_SCHEMA = {
     type: "json_schema",
     json_schema: {
