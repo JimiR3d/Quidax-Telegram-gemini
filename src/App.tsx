@@ -355,6 +355,10 @@ export default function App() {
   const [testMessageResult, setTestMessageResult] = useState<any>(null);
   const [testMessageError, setTestMessageError] = useState("");
 
+  // -- Training-loop verification state (Milestone 4) -------------------------
+  const [verifyState, setVerifyState] = useState<any>(null);
+  const [verifyStarting, setVerifyStarting] = useState(false);
+
   // -- Filters ----------------------------------------------------------------
   const [filterCategory, setFilterCategory]     = useState<string>("All");
 
@@ -715,6 +719,42 @@ export default function App() {
     reader.readAsText(file);
     e.target.value = '';
   };
+
+  // -- Training-loop verification (Milestone 4) -------------------------------
+  const pollVerify = useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/verify/progress");
+      setVerifyState(await res.json());
+    } catch { /* silent */ }
+  }, [apiFetch]);
+
+  const runVerify = async () => {
+    setVerifyStarting(true);
+    try {
+      const res = await apiFetch("/api/verify", { method: "POST", body: JSON.stringify({}) });
+      const data = await res.json();
+      if (!res.ok) {
+        setVerifyState({ running: false, error: data.error || "Failed to start verification", results: [], summary: null });
+      } else {
+        setVerifyState({ running: true, total: data.total, done: 0, results: [], summary: null, error: null });
+      }
+    } catch (e: any) {
+      if (e?.message !== "Unauthorized") setVerifyState({ running: false, error: e.message, results: [], summary: null });
+    }
+    setVerifyStarting(false);
+  };
+
+  // Load the last verification result when the modal opens; keep polling
+  // every 2s while a run is active so the progress bar moves.
+  useEffect(() => {
+    if (!showBenchmark || IS_TRAIN_ROUTE) return;
+    pollVerify();
+  }, [showBenchmark, pollVerify]);
+  useEffect(() => {
+    if (!showBenchmark || !verifyState?.running) return;
+    const iv = setInterval(pollVerify, 2000);
+    return () => clearInterval(iv);
+  }, [showBenchmark, verifyState?.running, pollVerify]);
 
   // -------------------------------------------------------------------------
   // RENDER: Login Screen
@@ -1692,6 +1732,102 @@ export default function App() {
                     <p className="text-sm">Click "Run Benchmark" to evaluate the AI classifier against 20 known test cases.</p>
                   </div>
                 )}
+
+                {/* Training Loop Verification (Milestone 4) */}
+                <div className="flex items-center gap-3 mb-4 mt-8">
+                  <h3 className="text-sm font-bold text-white">Training Loop Verification</h3>
+                  <div className="h-px bg-white/10 flex-1"></div>
+                </div>
+                <div className="bg-white/5 border border-white/10 rounded-xl p-5">
+                  <div className="flex items-start justify-between gap-4 mb-4">
+                    <p className="text-xs text-white/50">
+                      Re-runs the AI on messages a human already reviewed in /train — once with no training (baseline)
+                      and once learning from past corrections. Each message's own correction is hidden from it, so it
+                      cannot cheat. If the training loop works, the second score is higher.
+                    </p>
+                    <button
+                      onClick={runVerify}
+                      disabled={verifyStarting || verifyState?.running}
+                      className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold px-4 py-2 rounded-lg transition whitespace-nowrap"
+                    >
+                      {verifyState?.running ? "Verifying..." : verifyStarting ? "Starting..." : "Run Verification"}
+                    </button>
+                  </div>
+
+                  {verifyState?.error && (
+                    <div className="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 text-rose-400 text-xs mb-3">{verifyState.error}</div>
+                  )}
+
+                  {verifyState?.running && (
+                    <div className="mb-4">
+                      <div className="flex justify-between text-xs text-white/50 mb-1">
+                        <span>Re-classifying reviewed messages ({verifyState.done}/{verifyState.total})</span>
+                        <span>{verifyState.total ? Math.round((verifyState.done / verifyState.total) * 100) : 0}%</span>
+                      </div>
+                      <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                        <div className="h-full bg-indigo-500 transition-all" style={{ width: `${verifyState.total ? (verifyState.done / verifyState.total) * 100 : 0}%` }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {verifyState?.summary && (
+                    <>
+                      <div className="grid grid-cols-3 gap-4 mb-4">
+                        <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-center">
+                          <div className="text-3xl font-black text-white/70">{verifyState.summary.baselineAccuracy}%</div>
+                          <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">Baseline (no training)</div>
+                        </div>
+                        <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-4 text-center">
+                          <div className="text-3xl font-black text-indigo-400">{verifyState.summary.fewShotAccuracy}%</div>
+                          <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">With training</div>
+                        </div>
+                        {verifyState.summary.improvementPoints >= 0 ? (
+                          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
+                            <div className="text-3xl font-black text-emerald-400">+{verifyState.summary.improvementPoints}</div>
+                            <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">Points gained</div>
+                          </div>
+                        ) : (
+                          <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-4 text-center">
+                            <div className="text-3xl font-black text-rose-400">{verifyState.summary.improvementPoints}</div>
+                            <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">Points lost</div>
+                          </div>
+                        )}
+                      </div>
+                      {verifyState.summary.humanFixCases > 0 && (
+                        <p className="text-xs text-white/40 mb-4">
+                          On the {verifyState.summary.humanFixCases} message{verifyState.summary.humanFixCases === 1 ? "" : "s"} a human
+                          had to fix, the untrained AI scores {verifyState.summary.baselineAccuracyOnFixes}% — with training it scores {verifyState.summary.fewShotAccuracyOnFixes}%.
+                        </p>
+                      )}
+                      <div className="rounded-xl border border-white/10 overflow-hidden">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-white/10 bg-white/5 text-[10px] text-white/30 uppercase tracking-widest">
+                              <th className="px-4 py-3">Message</th>
+                              <th className="px-4 py-3">Human verdict</th>
+                              <th className="px-4 py-3">Baseline</th>
+                              <th className="px-4 py-3">With training</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {verifyState.results?.map((r: any, i: number) => (
+                              <tr key={i} className={`border-b border-white/5 ${r.fewShotMatch ? "bg-emerald-500/3" : "bg-rose-500/3"}`}>
+                                <td className="px-4 py-2.5 text-white/60 max-w-[220px] truncate">{r.text}</td>
+                                <td className="px-4 py-2.5 text-white/80 font-medium">{r.expected}</td>
+                                <td className={`px-4 py-2.5 ${r.baselineMatch ? "text-emerald-400" : "text-rose-400"}`}>{r.baseline} {r.baselineMatch ? "✅" : "❌"}</td>
+                                <td className={`px-4 py-2.5 ${r.fewShotMatch ? "text-emerald-400" : "text-rose-400"}`}>{r.fewShot} {r.fewShotMatch ? "✅" : "❌"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+
+                  {!verifyState?.running && !verifyState?.summary && !verifyState?.error && (
+                    <p className="text-xs text-white/30">No verification run yet. Review tickets in /train, then run this weekly to track accuracy improvement.</p>
+                  )}
+                </div>
               </div>
 
               {/* Footer */}
