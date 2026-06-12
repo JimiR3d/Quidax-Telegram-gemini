@@ -857,22 +857,14 @@ export default function App() {
       refDate = endD;
     }
   }
+  // The server now aggregates tickets-per-day in the database (keyed by Lagos
+  // calendar day, "yyyy-MM-dd") instead of shipping every raw ticket row.
+  const volumeByDay = globalStats?.volumeByDay || {};
   const volumeData = Array.from({ length: maxDays }).map((_, i) => {
-    const d       = subDays(refDate, (maxDays - 1) - i);
-    const dateStr = format(d, "MMM dd");
-    const rawData = globalStats?.rawStatsData || [];
-    return { 
-      date: dateStr, 
-      tickets: rawData.filter((t: any) => {
-        if (!t.created_at) return false;
-        try {
-          const parsed = parseISO(t.created_at);
-          if (isNaN(parsed.getTime())) return false;
-          return format(parsed, "MMM dd") === dateStr;
-        } catch {
-          return false;
-        }
-      }).length 
+    const d = subDays(refDate, (maxDays - 1) - i);
+    return {
+      date: format(d, "MMM dd"),
+      tickets: volumeByDay[format(d, "yyyy-MM-dd")] || 0,
     };
   });
 

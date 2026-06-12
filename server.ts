@@ -2093,11 +2093,6 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .select("*", { count: "exact" })
         .order("created_at", { ascending: false })
         .range(from, to);
-      let statsQuery = supabase
-        .from("tickets")
-        .select("id, status, urgency, created_at, updated_at, resolved_at, first_admin_reply_at, category")
-        .order("created_at", { ascending: false })
-        .limit(5e3);
       // All date boundaries are Lagos calendar days (UTC+1, no DST), matching
       // the Lagos-based "today" KPIs — the server itself runs in UTC on Railway.
       const lagosDay = (d) =>
@@ -2112,6 +2107,34 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         new Date(`${dateStr}T00:00:00.000+01:00`).toISOString();
       const lagosDayEndISO = (dateStr) =>
         new Date(`${dateStr}T23:59:59.999+01:00`).toISOString();
+      // Date window computed once and shared by the table query and the
+      // DB-side stats call, so the two can never drift apart.
+      let filterStart = null;
+      let filterEnd = null;
+      if (
+        req.query.days &&
+        req.query.days !== "All" &&
+        req.query.days !== "Custom"
+      ) {
+        const days = parseInt(req.query.days as string);
+        if (!isNaN(days)) {
+          const d = new Date(Date.now() - (days - 1) * 86400000);
+          filterStart = lagosDayStartISO(lagosDay(d));
+        }
+      }
+      if (req.query.days === "Custom") {
+        const startDate = String(req.query.startDate || "");
+        const endDate = String(req.query.endDate || "");
+        if (startDate)
+          filterStart = isPlainDate(startDate)
+            ? lagosDayStartISO(startDate)
+            : startDate;
+        if (endDate)
+          filterEnd = isPlainDate(endDate) ? lagosDayEndISO(endDate) : endDate;
+      }
+      const issuesOnly =
+        req.query.issues_only === "true" &&
+        (!req.query.urgency || req.query.urgency === "All");
       const applyBaseFilters = (q) => {
         let temp = q;
         if (user.role === "support") {
@@ -2119,39 +2142,16 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         } else if (req.query.group_id) {
           temp = temp.eq("group_id", req.query.group_id);
         }
-        if (req.query.issues_only === "true" && (!req.query.urgency || req.query.urgency === "All")) {
+        if (issuesOnly) {
           const nonEssStr = Array.from(NON_ESSENTIAL_CATEGORIES).map(c => `"${c}"`).join(",");
           temp = temp.or(
             `summary.eq."Processing message...",and(category.not.in.(${nonEssStr}),urgency.neq.Low)`,
           );
         }
-        if (
-          req.query.days &&
-          req.query.days !== "All" &&
-          req.query.days !== "Custom"
-        ) {
-          const days = parseInt(req.query.days as string);
-          if (!isNaN(days)) {
-            const d = new Date(Date.now() - (days - 1) * 86400000);
-            temp = temp.gte("created_at", lagosDayStartISO(lagosDay(d)));
-          }
-        }
-        if (req.query.days === "Custom") {
-          const startDate = String(req.query.startDate || "");
-          const endDate = String(req.query.endDate || "");
-          if (startDate)
-            temp = temp.gte(
-              "created_at",
-              isPlainDate(startDate) ? lagosDayStartISO(startDate) : startDate,
-            );
-          if (endDate)
-            temp = temp.lte(
-              "created_at",
-              isPlainDate(endDate) ? lagosDayEndISO(endDate) : endDate,
-            );
-        }
-        // Search must filter the KPI stats too, not just the table — it lives
-        // here so both queries see it.
+        if (filterStart) temp = temp.gte("created_at", filterStart);
+        if (filterEnd) temp = temp.lte("created_at", filterEnd);
+        // Search must filter the KPI stats too, not just the table — the
+        // stats RPC below receives the same search string.
         if (req.query.search) {
           temp = temp.or(
             `summary.ilike.%${req.query.search}%,category.ilike.%${req.query.search}%,raw_text.ilike.%${req.query.search}%`,
@@ -2172,128 +2172,65 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         }
         return temp;
       };
-      const applyStatsFilters = (q) => {
-        let temp = q;
-        if (req.query.urgency && req.query.urgency !== "All") {
-          temp = temp.eq("urgency", req.query.urgency);
-        }
-        if (req.query.category && req.query.category !== "All") {
-          temp = temp.eq("category", req.query.category);
-        }
-        return temp;
-      };
       query = applyTableFilters(applyBaseFilters(query));
-      statsQuery = applyStatsFilters(applyBaseFilters(statsQuery));
+      // Milestone 4: KPI aggregation happens in the database (tickets_stats,
+      // migration 012) over the FULL filtered set — the old code counted at
+      // most 5,000 rows in JS, which would silently undercount past 5,000
+      // tickets. Same filters as the table minus `status` (the KPI cards
+      // break tickets down by status, so a status filter never reaches stats).
+      const todayLagos = lagosDay(/* @__PURE__ */ new Date());
+      const statsParams = {
+        p_group_id:
+          user.role === "support"
+            ? user.tenantId
+            : req.query.group_id || null,
+        p_issues_only: issuesOnly,
+        p_start: filterStart,
+        p_end: filterEnd,
+        p_search: req.query.search ? String(req.query.search) : null,
+        p_urgency:
+          req.query.urgency && req.query.urgency !== "All"
+            ? req.query.urgency
+            : null,
+        p_category:
+          req.query.category && req.query.category !== "All"
+            ? req.query.category
+            : null,
+        p_today_start: lagosDayStartISO(todayLagos),
+        p_today_end: lagosDayEndISO(todayLagos),
+      };
       const [{ data, error, count }, { data: statsData, error: statsError }] =
-        await Promise.all([query, statsQuery]);
-      logger.debug("TicketsAPI", "Fetched tickets", { count, statsDataCount: statsData?.length });
+        await Promise.all([query, supabase.rpc("tickets_stats", statsParams)]);
+      logger.debug("TicketsAPI", "Fetched tickets", { count });
       if (error) {
         logger.error("TicketsAPI", "Error fetching tickets", { error });
         throw error;
       }
       if (statsError) {
-        logger.error("TicketsAPI", "Error fetching statsData", { error: statsError });
+        logger.error("TicketsAPI", "Error fetching stats", { error: statsError });
         throw statsError;
       }
-      // "Today" is computed in the support team's timezone (Lagos, UTC+1),
-      // not the server's — Railway/Cloud Run containers run in UTC.
-      const todayLagos = lagosDay(/* @__PURE__ */ new Date());
-      const isToday = (d) => lagosDay(d) === todayLagos;
-      const allData = statsData || [];
-      // Dismissed tickets (spam/chatter) are NOT resolutions — they are
-      // excluded from every resolved metric and from the resolution rate.
-      const resolved = allData.filter((t) => t.status === "Resolved");
-      // "Active" = every unresolved, non-dismissed state. Escalated and
-      // Awaiting User are unresolved, so they count toward the resolution rate
-      // denominator just like Open and In Review.
-      const ACTIVE_STATUSES = [
-        "Open",
-        "In Review",
-        "Escalated",
-        "Awaiting User",
-        "Classifying",
-      ];
-      const activeTickets = allData.filter((t) =>
-        ACTIVE_STATUSES.includes(t.status),
-      );
-      // Avg Response Time: mean of (first admin reply − ticket creation) over
-      // tickets that have a first admin reply. Legacy tickets (null column)
-      // are excluded rather than guessed at — same precedent as resolved_at.
-      const responseDurations = allData
-        .filter((t) => (t as any).first_admin_reply_at && t.created_at)
-        .map(
-          (t) =>
-            new Date((t as any).first_admin_reply_at).getTime() -
-            new Date(t.created_at).getTime(),
-        )
-        .filter((ms) => ms >= 0);
+      const dbStats = statsData || {};
+      const resolvedCount = dbStats.resolvedCount || 0;
+      const activeCount = dbStats.activeCount || 0;
       const stats = {
-        openCount: allData.filter((t) => t.status === "Open").length,
-        activeCount: activeTickets.length,
-        inReviewCount: allData.filter((t) => t.status === "In Review").length,
-        escalatedCount: allData.filter((t) => t.status === "Escalated").length,
-        awaitingUserCount: allData.filter((t) => t.status === "Awaiting User")
-          .length,
-        avgResponseMs:
-          responseDurations.length > 0
-            ? Math.round(
-                responseDurations.reduce((a, b) => a + b, 0) /
-                  responseDurations.length,
-              )
-            : null,
-        respondedCount: responseDurations.length,
-        resolvedTodayCount: resolved.filter(
-          (t) =>
-            (t as any).resolved_at && isToday(new Date((t as any).resolved_at)),
-        ).length,
-        resolvedCount: resolved.length,
-        criticalCount: allData.filter(
-          (t) =>
-            t.urgency === "Critical" &&
-            t.status !== "Resolved" &&
-            t.status !== "Dismissed",
-        ).length,
-        highCount: allData.filter(
-          (t) =>
-            t.urgency === "High" &&
-            t.status !== "Resolved" &&
-            t.status !== "Dismissed",
-        ).length,
-        mediumCount: allData.filter(
-          (t) =>
-            t.urgency === "Medium" &&
-            t.status !== "Resolved" &&
-            t.status !== "Dismissed",
-        ).length,
-        lowCount: allData.filter(
-          (t) =>
-            t.urgency === "Low" &&
-            t.status !== "Resolved" &&
-            t.status !== "Dismissed",
-        ).length,
-        ticketsTodayCount: allData.filter((t) =>
-          isToday(new Date(t.created_at)),
-        ).length,
+        // From the DB: open/active/inReview/escalated/awaitingUser counts,
+        // avgResponseMs + respondedCount, resolved + resolvedToday counts,
+        // per-urgency active counts, ticketsTodayCount, categoryCount, and
+        // volumeByDay (per-Lagos-day ticket counts for the volume chart,
+        // which previously needed every raw row shipped to the browser).
+        ...dbStats,
         totalCount: count ?? 0,
+        // Dismissed tickets (spam/chatter) are NOT resolutions — the rate is
+        // Resolved ÷ (Resolved + Active), Dismissed excluded everywhere.
         resolutionRate:
-          resolved.length + activeTickets.length > 0
-            ? Math.round(
-                (resolved.length /
-                  (resolved.length + activeTickets.length)) *
-                  100,
-              )
+          resolvedCount + activeCount > 0
+            ? Math.round((resolvedCount / (resolvedCount + activeCount)) * 100)
             : 0,
-        categoryCount: allData.reduce((acc, t) => {
-          acc[t.category || "Uncategorized"] =
-            (acc[t.category || "Uncategorized"] || 0) + 1;
-          return acc;
-        }, {}),
         resolutionData: [
-          { name: "Resolved", value: resolved.length },
-          { name: "Active", value: activeTickets.length },
+          { name: "Resolved", value: resolvedCount },
+          { name: "Active", value: activeCount },
         ],
-        rawStatsData: allData,
-        // needed for chart data over days
       };
       return res.json({
         tickets: data,
