@@ -1682,6 +1682,33 @@ ${lines.join("\n---\n")}`;
       throw new Error(`DB Error inserting ticket: ${ticketError.message}`);
     }
     (async () => {
+      // Milestone 4 race fix: while the classifier runs (~5-10s), an admin
+      // reply can move this ticket to "In Review", a human can escalate it,
+      // etc. The classifier must never clobber such a status. Step 1 updates
+      // INCLUDING status, guarded on status still being exactly what
+      // ingestion inserted — atomic, because the WHERE is re-evaluated under
+      // the row lock. If the guard misses (someone changed it mid-flight),
+      // step 2 writes the classification fields and leaves status alone.
+      const insertedStatus = ticketInsert.status;
+      const applyClassification = async (fields, finalStatus) => {
+        const { data: guarded, error: guardErr } = await supabase
+          .from("tickets")
+          .update({ ...fields, status: finalStatus })
+          .eq("id", dbTicket.id)
+          .eq("status", insertedStatus)
+          .select("id");
+        if (guardErr) throw new Error(guardErr.message);
+        if (guarded && guarded.length > 0) return;
+        const { error: fieldsErr } = await supabase
+          .from("tickets")
+          .update(fields)
+          .eq("id", dbTicket.id);
+        if (fieldsErr) throw new Error(fieldsErr.message);
+        logger.info(
+          "Classification",
+          `Ticket ${dbTicket.id}: status changed while classifying - saved classification without touching status`,
+        );
+      };
       let fewShot = "";
       try {
         let ticketData;
@@ -1742,9 +1769,8 @@ ${lines.join("\n---\n")}`;
         const finalSummary = needsEscalation
           ? `[ESCALATED] ${ticketData.summary}`
           : ticketData.summary;
-        await supabase
-          .from("tickets")
-          .update({
+        await applyClassification(
+          {
             summary: finalSummary,
             category: ticketData.category,
             urgency: ticketData.urgency,
@@ -1752,10 +1778,10 @@ ${lines.join("\n---\n")}`;
             sentiment: ticketData.sentiment,
             is_complaint: ticketData.is_complaint,
             suggested_action: ticketData.suggested_action,
-            status: finalStatus,
             suggested_reply: suggestedReply || null,
-          })
-          .eq("id", dbTicket.id);
+          },
+          finalStatus,
+        );
         logger.info("Classification", `Ticket ${dbTicket.id} classified`, {
           urgency: ticketData.urgency,
           category: ticketData.category,
@@ -1805,9 +1831,8 @@ ${lines.join("\n---\n")}`;
           const finalSummary = needsEscalation
             ? `[ESCALATED] ${ticketData.summary}`
             : ticketData.summary;
-          await supabase
-            .from("tickets")
-            .update({
+          await applyClassification(
+            {
               summary: finalSummary,
               category: ticketData.category,
               urgency: ticketData.urgency,
@@ -1815,10 +1840,10 @@ ${lines.join("\n---\n")}`;
               sentiment: ticketData.sentiment,
               is_complaint: ticketData.is_complaint,
               suggested_action: ticketData.suggested_action,
-              status: finalStatus,
               suggested_reply: suggestedReply || null,
-            })
-            .eq("id", dbTicket.id);
+            },
+            finalStatus,
+          );
           logger.info(
             "Classification",
             `Ticket ${dbTicket.id} classified via Gemini Fallback`,
@@ -1830,13 +1855,16 @@ ${lines.join("\n---\n")}`;
             `Background classification (Gemini Fallback) failed for ticket ${dbTicket.id}`,
             { error: geminiErr.message },
           );
-          await supabase
-            .from("tickets")
-            .update({
-              status: isAdminSender ? "Resolved" : "Open",
-              summary: "Classification failed - manual review needed.",
-            })
-            .eq("id", dbTicket.id);
+          await applyClassification(
+            { summary: "Classification failed - manual review needed." },
+            isAdminSender ? "Resolved" : "Open",
+          ).catch((updateErr) =>
+            logger.error(
+              "Classification",
+              `Failed to mark ticket ${dbTicket.id} as classification-failed`,
+              { error: updateErr.message },
+            ),
+          );
         }
       }
     })();
