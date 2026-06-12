@@ -15,7 +15,7 @@ type Ticket = {
   sentiment: string;
   is_complaint: boolean;
   suggested_action: string;
-  status: "Open" | "In Review" | "Resolved" | "Dismissed" | "Classifying";
+  status: "Open" | "In Review" | "Escalated" | "Awaiting User" | "Resolved" | "Dismissed" | "Classifying";
   raw_text: string;
   created_at: string;
   suggested_reply?: string | null;
@@ -567,7 +567,10 @@ export default function App() {
   const ticketsToday    = globalStats?.ticketsTodayCount || 0;
   const openCount       = globalStats?.openCount || 0;
   const activeCount     = globalStats?.activeCount || 0;
+  const inReviewCount   = globalStats?.inReviewCount || 0;
   const escalatedCount  = globalStats?.escalatedCount || 0;
+  const awaitingUserCount = globalStats?.awaitingUserCount || 0;
+  const avgResponseMs   = globalStats?.avgResponseMs ?? null;
   const resolvedTodayCount = globalStats?.resolvedTodayCount || 0;
   const resolvedCount   = globalStats?.resolvedCount || 0;
   const totalIssues     = globalStats ? (globalStats.criticalCount + globalStats.highCount + globalStats.mediumCount + globalStats.lowCount) : 0;
@@ -579,6 +582,18 @@ export default function App() {
     urgencyFilter === "Critical" ? globalStats.criticalCount : 0
   ) : 0;
   const resolutionRate  = globalStats?.resolutionRate || 0;
+
+  // Avg Response Time is null when no ticket has a first admin reply yet
+  // (legacy tickets never get one — no fabricated timestamps).
+  const formatDuration = (ms: number | null) => {
+    if (ms === null) return "—";
+    const mins = ms / 60_000;
+    if (mins < 1) return "<1m";
+    if (mins < 60) return `${Math.round(mins)}m`;
+    const hours = mins / 60;
+    if (hours < 24) return `${hours.toFixed(1)}h`;
+    return `${(hours / 24).toFixed(1)}d`;
+  };
 
   const getKpiTitle = (baseTitle: string) => {
     const parts = [];
@@ -841,6 +856,8 @@ export default function App() {
                 <option value="Classifying">Classifying</option>
                 <option value="Open">Open</option>
                 <option value="In Review">In Review</option>
+                <option value="Escalated">Escalated</option>
+                <option value="Awaiting User">Awaiting User</option>
                 <option value="Resolved">Resolved</option>
                 <option value="Dismissed">Dismissed</option>
               </select>
@@ -869,7 +886,7 @@ export default function App() {
           </div>
 
           {/* Stats Row */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-6">
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTitle("Active Issues")}>
@@ -888,8 +905,11 @@ export default function App() {
                 </p>
               </div>
               <div className="flex items-end justify-between w-full">
-                <span className={`text-4xl font-bold ${escalatedCount > 0 ? "text-amber-500" : "text-amber-500/80"}`}>{escalatedCount}</span>
+                <span className={`text-4xl font-bold ${inReviewCount > 0 ? "text-amber-500" : "text-amber-500/80"}`}>{inReviewCount}</span>
               </div>
+              <p className="text-[11px] text-white/40 mt-2 truncate">
+                {escalatedCount} escalated · {awaitingUserCount} awaiting user
+              </p>
             </div>
             <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
@@ -911,6 +931,17 @@ export default function App() {
                   <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${resolutionRate}%` }} />
                 </div>
               </div>
+            </div>
+            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+              <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTitle("Avg Response Time")}>
+                {getKpiTitle("Avg Response Time")}
+              </p>
+              <div className="flex items-end justify-between w-full">
+                <span className={`text-4xl font-bold ${avgResponseMs !== null ? "text-sky-400" : "text-white/30"}`}>{formatDuration(avgResponseMs)}</span>
+              </div>
+              <p className="text-[11px] text-white/40 mt-2 truncate">
+                {avgResponseMs !== null ? "first admin reply, tracked tickets" : "no tracked replies yet"}
+              </p>
             </div>
           </div>
 
@@ -1055,9 +1086,11 @@ export default function App() {
                               ) : (
                                 <select
                                   className={`text-[10px] uppercase font-bold tracking-widest rounded px-2 py-1 outline-none border border-white/10 appearance-none [&>option]:text-black ${
-                                    ticket.status === "Open"       ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" :
-                                    ticket.status === "Resolved"   ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
-                                    ticket.status === "Dismissed"  ? "bg-white/5 text-white/40 border-white/10" :
+                                    ticket.status === "Open"          ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20" :
+                                    ticket.status === "Escalated"     ? "bg-rose-500/10 text-rose-400 border-rose-500/20" :
+                                    ticket.status === "Awaiting User" ? "bg-sky-500/10 text-sky-400 border-sky-500/20" :
+                                    ticket.status === "Resolved"      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                                    ticket.status === "Dismissed"     ? "bg-white/5 text-white/40 border-white/10" :
                                     "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                   }`}
                                   value={ticket.status}
@@ -1066,6 +1099,8 @@ export default function App() {
                                 >
                                   <option value="Open">Open</option>
                                   <option value="In Review">In Review</option>
+                                  <option value="Escalated">Escalated</option>
+                                  <option value="Awaiting User">Awaiting User</option>
                                   <option value="Resolved">Resolved</option>
                                   <option value="Dismissed">Dismissed</option>
                                 </select>

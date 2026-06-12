@@ -1032,7 +1032,7 @@ Classify the user message below. Do NOT default to General Question unless the u
           .from("tickets")
           .select("*")
           .eq("sender_hash", senderHash)
-          .in("status", ["Open", "In Review"])
+          .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
           .order("created_at", { ascending: false })
           .limit(1);
         if (recentTickets && recentTickets.length > 0) {
@@ -1096,11 +1096,21 @@ Classify the user message below. Do NOT default to General Question unless the u
               const newRawText =
                 parentTicket.raw_text +
                 `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+              // Resolved stays Resolved; Escalated / Awaiting User keep their
+              // state (an admin update does not un-escalate a ticket); anything
+              // else moves to In Review. first_admin_reply_at is stamped once,
+              // with the message's own timestamp so backfills stay accurate.
               await supabase
                 .from("tickets")
                 .update({
                   raw_text: newRawText,
-                  status: parentTicket.status === "Resolved" ? "Resolved" : "In Review",
+                  status: ["Resolved", "Escalated", "Awaiting User"].includes(
+                    parentTicket.status,
+                  )
+                    ? parentTicket.status
+                    : "In Review",
+                  first_admin_reply_at:
+                    parentTicket.first_admin_reply_at ?? msgDateISO,
                   updated_at: new Date().toISOString(),
                 })
                 .eq("id", parentTicket.id);
@@ -1167,7 +1177,7 @@ Classify the user message below. Do NOT default to General Question unless the u
               .from("tickets")
               .select("*")
               .eq("sender_hash", senderHash)
-              .in("status", ["Open", "In Review"])
+              .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
               .order("created_at", { ascending: false })
               .limit(1);
             if (recentTickets && recentTickets.length > 0) {
@@ -1182,9 +1192,17 @@ Classify the user message below. Do NOT default to General Question unless the u
             const newRawText =
               parentTicket.raw_text +
               `\n\n[USER_REPLY]\n${text}\n[/USER_REPLY]`;
+            // The user has responded, so a ticket parked on "Awaiting User"
+            // goes back into the admin queue as "In Review".
             await supabase
               .from("tickets")
-              .update({ raw_text: newRawText })
+              .update({
+                raw_text: newRawText,
+                ...(parentTicket.status === "Awaiting User"
+                  ? { status: "In Review" }
+                  : {}),
+                updated_at: new Date().toISOString(),
+              })
               .eq("id", parentTicket.id);
             logger.info(
               "Ingestion",
@@ -1236,7 +1254,7 @@ Classify the user message below. Do NOT default to General Question unless the u
           .select("*")
           .eq("group_id", groupId)
           .eq("is_admin_message", false)
-          .in("status", ["Open", "In Review"])
+          .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
           .gte("created_at", windowStartISO)
           .lte("created_at", msgDateISO)
           .order("created_at", { ascending: false })
@@ -1246,11 +1264,20 @@ Classify the user message below. Do NOT default to General Question unless the u
           const newRawText =
             parentTicket.raw_text +
             `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+          // Escalated / Awaiting User keep their state (same rule as quoted
+          // admin replies); Open moves to In Review. first_admin_reply_at is
+          // stamped once, with the message's own timestamp.
           await supabase
             .from("tickets")
             .update({
               raw_text: newRawText,
-              status: "In Review",
+              status: ["Escalated", "Awaiting User"].includes(
+                parentTicket.status,
+              )
+                ? parentTicket.status
+                : "In Review",
+              first_admin_reply_at:
+                parentTicket.first_admin_reply_at ?? msgDateISO,
               updated_at: new Date().toISOString(),
             })
             .eq("id", parentTicket.id);
@@ -1853,7 +1880,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .range(from, to);
       let statsQuery = supabase
         .from("tickets")
-        .select("id, status, urgency, created_at, updated_at, resolved_at, category")
+        .select("id, status, urgency, created_at, updated_at, resolved_at, first_admin_reply_at, category")
         .order("created_at", { ascending: false })
         .limit(5e3);
       // All date boundaries are Lagos calendar days (UTC+1, no DST), matching
@@ -1961,13 +1988,45 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       // Dismissed tickets (spam/chatter) are NOT resolutions — they are
       // excluded from every resolved metric and from the resolution rate.
       const resolved = allData.filter((t) => t.status === "Resolved");
-      const openOrReviewOrClassifying = allData.filter(
-        (t) => t.status === "Open" || t.status === "In Review" || t.status === "Classifying",
+      // "Active" = every unresolved, non-dismissed state. Escalated and
+      // Awaiting User are unresolved, so they count toward the resolution rate
+      // denominator just like Open and In Review.
+      const ACTIVE_STATUSES = [
+        "Open",
+        "In Review",
+        "Escalated",
+        "Awaiting User",
+        "Classifying",
+      ];
+      const activeTickets = allData.filter((t) =>
+        ACTIVE_STATUSES.includes(t.status),
       );
+      // Avg Response Time: mean of (first admin reply − ticket creation) over
+      // tickets that have a first admin reply. Legacy tickets (null column)
+      // are excluded rather than guessed at — same precedent as resolved_at.
+      const responseDurations = allData
+        .filter((t) => (t as any).first_admin_reply_at && t.created_at)
+        .map(
+          (t) =>
+            new Date((t as any).first_admin_reply_at).getTime() -
+            new Date(t.created_at).getTime(),
+        )
+        .filter((ms) => ms >= 0);
       const stats = {
         openCount: allData.filter((t) => t.status === "Open").length,
-        activeCount: openOrReviewOrClassifying.length,
-        escalatedCount: allData.filter((t) => t.status === "In Review").length,
+        activeCount: activeTickets.length,
+        inReviewCount: allData.filter((t) => t.status === "In Review").length,
+        escalatedCount: allData.filter((t) => t.status === "Escalated").length,
+        awaitingUserCount: allData.filter((t) => t.status === "Awaiting User")
+          .length,
+        avgResponseMs:
+          responseDurations.length > 0
+            ? Math.round(
+                responseDurations.reduce((a, b) => a + b, 0) /
+                  responseDurations.length,
+              )
+            : null,
+        respondedCount: responseDurations.length,
         resolvedTodayCount: resolved.filter(
           (t) =>
             (t as any).resolved_at && isToday(new Date((t as any).resolved_at)),
@@ -2002,10 +2061,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         ).length,
         totalCount: count ?? 0,
         resolutionRate:
-          resolved.length + openOrReviewOrClassifying.length > 0
+          resolved.length + activeTickets.length > 0
             ? Math.round(
                 (resolved.length /
-                  (resolved.length + openOrReviewOrClassifying.length)) *
+                  (resolved.length + activeTickets.length)) *
                   100,
               )
             : 0,
@@ -2016,7 +2075,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         }, {}),
         resolutionData: [
           { name: "Resolved", value: resolved.length },
-          { name: "Active", value: openOrReviewOrClassifying.length },
+          { name: "Active", value: activeTickets.length },
         ],
         rawStatsData: allData,
         // needed for chart data over days
@@ -2043,7 +2102,14 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       const user = req.user;
       const ticketId = req.params.id;
       const { status } = req.body;
-      const VALID_STATUSES = ["Open", "In Review", "Resolved", "Dismissed"];
+      const VALID_STATUSES = [
+        "Open",
+        "In Review",
+        "Escalated",
+        "Awaiting User",
+        "Resolved",
+        "Dismissed",
+      ];
       if (!status || !VALID_STATUSES.includes(status)) {
         return res
           .status(400)
@@ -2480,7 +2546,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
             .status(403)
             .json({ error: "Forbidden: insufficient permissions" });
         }
-        const { text, telegramId, isAdmin, msgDate } = req.body;
+        const { text, telegramId, isAdmin, msgDate, replyToMsgId } = req.body;
         if (!text || typeof text !== "string" || text.trim().length === 0) {
           return res
             .status(400)
@@ -2500,9 +2566,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           text,
           tId,
           targetGroup,
-          void 0,
-          // optional unix-seconds timestamp + admin flag let super_admins
-          // simulate admin replies when testing ingestion heuristics
+          // optional quoted-reply target, unix-seconds timestamp and admin
+          // flag let super_admins simulate reply threads when testing
+          // ingestion heuristics
+          replyToMsgId ? Number(replyToMsgId) : void 0,
           msgDate ? Number(msgDate) : void 0,
           isAdmin === true,
           void 0,
