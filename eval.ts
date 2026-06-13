@@ -10,6 +10,7 @@
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import { BENCHMARK_CASES as DEFAULT_CASES } from "./benchmark-cases";
 dotenv.config();
 
 const BASE_URL = process.env.EVAL_BASE_URL || "http://localhost:3000";
@@ -24,8 +25,11 @@ interface BenchmarkCase {
   expectedIsComplaint: boolean;
 }
 
-const casesFile = process.argv[2] ? path.resolve(process.argv[2]) : path.resolve(process.cwd(), "benchmark_cases.json");
-const BENCHMARK_CASES: BenchmarkCase[] = JSON.parse(fs.readFileSync(casesFile, "utf-8"));
+// Default to the committed benchmark-cases module (single source of truth,
+// shared with /api/eval). An optional file path arg still overrides it.
+const BENCHMARK_CASES: BenchmarkCase[] = process.argv[2]
+  ? JSON.parse(fs.readFileSync(path.resolve(process.argv[2]), "utf-8"))
+  : DEFAULT_CASES;
 
 interface EvalResult {
   id: number;

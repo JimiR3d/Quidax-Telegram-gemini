@@ -27,6 +27,7 @@ import {
   matchPath,
   shouldReconnect,
 } from "./listener-health";
+import { BENCHMARK_CASES } from "./benchmark-cases";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -2860,18 +2861,16 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
     }
   });
   app.all("/api/eval", requireAuth, async (req, res) => {
-    let GOLD_MESSAGES = [];
-    try {
-      const benchmarkData = fs.readFileSync(path.join(process.cwd(), "benchmark_cases.json"), "utf-8");
-      const cases = JSON.parse(benchmarkData);
-      GOLD_MESSAGES = cases.map((c: any) => ({
-        text: c.message,
-        expectedCategory: c.expectedCategory,
-        expectedUrgency: c.expectedUrgency
-      }));
-    } catch (err) {
-      logger.warn("Eval", "Could not load benchmark_cases.json, falling back to request body or empty array.");
-    }
+    // The 12 gold cases ship as a committed TS module (benchmark-cases.ts) so
+    // they are bundled into dist and always deploy. The old fs read of
+    // benchmark_cases.json failed in production because that file is gitignored
+    // (KNOWN_ISSUES §6 item 6). A POST body of {messages:[...]} still overrides
+    // the defaults (the modal's file-upload path).
+    let GOLD_MESSAGES = BENCHMARK_CASES.map((c) => ({
+      text: c.message,
+      expectedCategory: c.expectedCategory,
+      expectedUrgency: c.expectedUrgency,
+    }));
     if (req.method === "POST" && req.body && Array.isArray(req.body.messages)) {
       GOLD_MESSAGES = req.body.messages;
     }
@@ -2880,7 +2879,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
     let correct = 0;
     let categoryCorrect = 0;
     let urgencyCorrect = 0;
-    for (const gold of GOLD_MESSAGES) {
+    // Sequential with 2.1s spacing between Groq calls (free-tier rate limits),
+    // matching the verify loop (GROQ_DELAY_MS). Never Promise.all the batch.
+    const EVAL_GROQ_DELAY_MS = 2100;
+    for (const [i, gold] of GOLD_MESSAGES.entries()) {
       try {
         const response = await withTimeout(
           openai.chat.completions.create({
@@ -2932,13 +2934,20 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           error: e.message,
         });
       }
+      if (i < GOLD_MESSAGES.length - 1) {
+        await new Promise((r) => setTimeout(r, EVAL_GROQ_DELAY_MS));
+      }
     }
     const total = GOLD_MESSAGES.length;
+    // With no cases, return null accuracies (not NaN) so the contract is honest
+    // and the modal can show an empty state instead of a bare "%".
+    const pct = (n: number) =>
+      total > 0 ? Math.round((n / total) * 100) : null;
     return res.json({
       total,
-      categoryAccuracy: Math.round((categoryCorrect / total) * 100),
-      urgencyAccuracy: Math.round((urgencyCorrect / total) * 100),
-      overallAccuracy: Math.round((correct / total) * 100),
+      categoryAccuracy: pct(categoryCorrect),
+      urgencyAccuracy: pct(urgencyCorrect),
+      overallAccuracy: pct(correct),
       results,
     });
   });

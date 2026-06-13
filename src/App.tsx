@@ -1657,8 +1657,8 @@ export default function App() {
                 {evalLoading && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-white/50 text-sm">Running 20 test messages through AI classifier...</p>
-                    <p className="text-white/30 text-xs">This takes ~30 seconds</p>
+                    <p className="text-white/50 text-sm">Running benchmark cases through the AI classifier...</p>
+                    <p className="text-white/30 text-xs">This can take up to a minute</p>
                   </div>
                 )}
 
@@ -1666,7 +1666,13 @@ export default function App() {
                   <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-4 text-rose-400 text-sm">{evalResults.error}</div>
                 )}
 
-                {evalResults && !evalResults.error && (
+                {evalResults && !evalResults.error && (evalResults.total === 0 || evalResults.categoryAccuracy == null) && (
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-6 text-center text-white/50 text-sm">
+                    No benchmark cases available to run.
+                  </div>
+                )}
+
+                {evalResults && !evalResults.error && evalResults.total > 0 && evalResults.categoryAccuracy != null && (
                   <>
                     {/* Score Cards */}
                     <div className="grid grid-cols-3 gap-4 mb-6">
