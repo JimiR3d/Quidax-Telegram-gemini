@@ -19,6 +19,7 @@ Read PULSEDESK_HANDOFF.md and PRD.md first. Restate the task, list which files w
 Update PULSEDESK_HANDOFF.md, KNOWN_ISSUES.md, and PRD.md. Summarize what was done and what is pending.
 
 ## Lessons learned
+- **Local test runs on port 3100 can leave background processes holding the port between bash calls** — if a test server seems missing or curl hangs, always check for and kill lingering node processes on that port before starting a new one (PowerShell: `netstat -ano | Select-String ":3100"` → `Stop-Process -Id <pid> -Force`).
 - **Three overlapping ingestion paths:** live listener, AutoFetch (startup + every 15 min, 2-hour lookback), and manual backfill all call `processAndIngestMessage`. Any mutation inside that function MUST be idempotent — the `telegram_message_id` dedup check must stay at the very top, before any branch that writes.
 - **`tickets.updated_at` is NOT auto-maintained** — there is no DB trigger; code must set it explicitly on every update. `resolved_at` is the source of truth for when a ticket was closed; reopening clears it. Legacy tickets resolved before 2026-06-11 have `resolved_at = null` by design.
 - **Resolution Rate definition (product decision, 2026-06-11):** Resolved ÷ (Resolved + Active). Dismissed tickets are spam/chatter, never counted as resolutions anywhere.
