@@ -22,6 +22,11 @@ import {
   recoverQuotedParent,
   type FetchedParentMessage,
 } from "./quoted-parent";
+import {
+  isMessageInTargetGroup,
+  matchPath,
+  shouldReconnect,
+} from "./listener-health";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -2213,17 +2218,24 @@ ${lines.join("\n---\n")}`;
           client.addEventHandler(async (event) => {
             const message = event.message;
             if (!message || !message.text) return;
-            lastMessageReceivedAt = Date.now();
             try {
               const chat = await message.getChat();
-                const inTarget =
-                  chat &&
-                  ((chat as any).username === targetGroup ||
-                    (chat as any).title?.includes(targetGroup) ||
-                    (chat as any).title?.toLowerCase().includes("quidax"));
+              const channelId = await resolveTargetChannelId();
+              const inTarget = isMessageInTargetGroup(
+                chat as any,
+                targetGroup,
+                channelId,
+              );
               if (inTarget) {
+                // Only TARGET-group traffic keeps the watchdog timer warm.
+                // DMs and other chats must NOT reset it, or a silently-dead
+                // group listener is never reconnected (KNOWN_ISSUES §6 item 1).
+                lastMessageReceivedAt = Date.now();
                 logger.info("Telegram", `Live message received`, {
                   preview: message.text.substring(0, 60),
+                  chatId: chat ? String((chat as any).id) : null,
+                  targetChannelId: channelId,
+                  matchedBy: matchPath(chat as any, channelId),
                 });
                 const replyToMsgId =
                   message.replyTo?.replyToMsgId || message.replyToMsgId;
@@ -2243,6 +2255,13 @@ ${lines.join("\n---\n")}`;
                   String(senderId),
                   senderUsername
                 );
+              } else {
+                // Logged so a live observation window can confirm DMs/other
+                // chats are correctly excluded and never warm the watchdog.
+                logger.debug("Telegram", "Ignoring live message from another chat", {
+                  chatId: chat ? String((chat as any).id) : null,
+                  targetChannelId: channelId,
+                });
               }
             } catch (e) {
               logger.error("Telegram", "Error processing live message", {
@@ -2338,9 +2357,10 @@ ${lines.join("\n---\n")}`;
           }, new Raw({}));
           setInterval(
             async () => {
+              const WATCHDOG_SILENCE_MS = 30 * 60 * 1e3;
               const silenceMs = Date.now() - lastMessageReceivedAt;
               const silenceMin = Math.floor(silenceMs / 6e4);
-              if (silenceMs > 30 * 60 * 1e3) {
+              if (shouldReconnect(lastMessageReceivedAt, Date.now(), WATCHDOG_SILENCE_MS)) {
                 logger.warn(
                   "Watchdog",
                   `No Telegram messages received for ${silenceMin} minutes - checking connection`,
