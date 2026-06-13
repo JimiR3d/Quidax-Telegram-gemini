@@ -28,6 +28,7 @@ import {
   shouldReconnect,
 } from "./listener-health";
 import { BENCHMARK_CASES } from "./benchmark-cases";
+import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -900,8 +901,20 @@ async function checkIsAdmin(groupId, senderId, senderUsername = "") {
 
   return false;
 };
+  // FIX 8 (KNOWN_ISSUES §6 item 7): once Gemini reports a quota / 429 /
+  // RESOURCE_EXHAUSTED error, stop calling it until this cooldown elapses, so
+  // the 15-min repair sweep (and the live pipeline) stop re-burning an
+  // exhausted daily free-tier quota and stop tripping the shared geminiBreaker
+  // every cycle. Only a genuine quota error arms it (isQuotaExhaustedError) — a
+  // transient 503/overload still uses the short-backoff retry below.
+  const GEMINI_QUOTA_COOLDOWN_MS = 60 * 60 * 1e3;
+  let geminiQuotaCooldownUntil = 0;
+  const inGeminiQuotaCooldown = () => Date.now() < geminiQuotaCooldownUntil;
   async function generateSuggestedReply(text, classification) {
     if (!genAI) return "";
+    // Don't even call Gemini while the quota cooldown is active — a call now
+    // would just fail and re-arm the cooldown for nothing.
+    if (inGeminiQuotaCooldown()) return "";
     const attemptOnce = () =>
       geminiBreaker.call(() =>
         withTimeout(
@@ -940,11 +953,23 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
       try {
         return await attemptOnce();
       } catch (e) {
+        // A quota / 429 / RESOURCE_EXHAUSTED error will not clear on a short
+        // backoff (it is the daily free-tier cap), so arm the cooldown and
+        // stop immediately instead of burning two more attempts on it.
+        if (isQuotaExhaustedError(e)) {
+          geminiQuotaCooldownUntil = Date.now() + GEMINI_QUOTA_COOLDOWN_MS;
+          logger.error(
+            "Gemini",
+            `generateSuggestedReply hit a quota limit on attempt ${attempt}/${MAX_ATTEMPTS} - cooling down for ${GEMINI_QUOTA_COOLDOWN_MS / 6e4}min`,
+            describeLLMError(e),
+          );
+          return "";
+        }
         const willRetry = attempt < MAX_ATTEMPTS && isRetryableLLMError(e);
         logger[willRetry ? "warn" : "error"](
           "Gemini",
           `generateSuggestedReply attempt ${attempt}/${MAX_ATTEMPTS} failed${willRetry ? " - retrying with backoff" : ""}`,
-          { error: e.message },
+          describeLLMError(e),
         );
         if (!willRetry) return "";
         const backoffMs = 1e3 * 2 ** (attempt - 1) + Math.random() * 500;
@@ -963,6 +988,16 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
   async function repairMissingSuggestedReplies() {
     try {
       if (!genAI) return;
+      // FIX 8: while Gemini is in quota cooldown, skip the whole sweep with a
+      // single log line — re-running it would just fail 1 call and re-arm the
+      // cooldown. The next sweep after the cooldown expires probes again.
+      if (inGeminiQuotaCooldown()) {
+        logger.info(
+          "ReplyRepair",
+          `Skipping sweep - Gemini in quota cooldown until ${new Date(geminiQuotaCooldownUntil).toISOString()}`,
+        );
+        return;
+      }
       const supabase = getSupabase();
       const cutoffISO = new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString();
       const { data: rows, error } = await supabase
