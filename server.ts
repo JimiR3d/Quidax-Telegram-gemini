@@ -27,6 +27,7 @@ import {
   matchPath,
   shouldReconnect,
 } from "./listener-health";
+import { findTargetInDialogs } from "./dialog-priming";
 import { BENCHMARK_CASES } from "./benchmark-cases";
 import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
 import { PIDGIN_GLOSSARY_PROMPT } from "./pidgin-glossary";
@@ -2198,6 +2199,69 @@ ${lines.join("\n---\n")}`;
             return targetChannelId;
           };
           resolveTargetChannelId();
+          // Prime the session so Telegram PUSHES this supergroup's messages to
+          // the live NewMessage handler. GramJS 2.26.x is push-only (catchUp()
+          // is a no-op, no getChannelDifference recovery), so without a
+          // getDialogs() call after connecting from a StringSession the group's
+          // updates are never delivered and AutoFetch silently carries all
+          // ingestion (KNOWN_ISSUES §6 item 1). Also a definitive membership
+          // probe: if the target group is ABSENT from the dialog list the
+          // account is not a member (Milestone 5 USER_BANNED_IN_CHANNEL) and no
+          // code change can revive live delivery. Fail-safe — never throws; runs
+          // at startup and after every watchdog reconnect (a reconnect
+          // re-establishes the session and must re-prime).
+          const primeChannelUpdates = async (reason: string) => {
+            try {
+              const channelId = await resolveTargetChannelId();
+              const dialogs = await client.getDialogs({ limit: 100 });
+              const identities = (dialogs || []).map((d: any) => {
+                const ent = (d && (d.entity || d)) || {};
+                return {
+                  id:
+                    ent.id != null
+                      ? String(ent.id)
+                      : d && d.id != null
+                        ? String(d.id)
+                        : null,
+                  username: ent.username ?? null,
+                  title: ent.title ?? (d && d.title) ?? null,
+                };
+              });
+              const found = findTargetInDialogs(
+                identities,
+                targetGroup,
+                channelId,
+              );
+              if (found.present) {
+                logger.info(
+                  "Telegram",
+                  `Primed channel updates (${reason}) - target group present in dialogs, live listener should now receive pushes`,
+                  {
+                    dialogCount: found.dialogCount,
+                    matchedBy: found.matchedBy,
+                    matchedId: found.matchedId,
+                    targetChannelId: channelId,
+                  },
+                );
+              } else {
+                logger.warn(
+                  "Telegram",
+                  `Primed dialogs (${reason}) but TARGET GROUP IS ABSENT - live listener will receive nothing; account is likely not a member / banned (AutoFetch still reads public history)`,
+                  {
+                    dialogCount: found.dialogCount,
+                    targetChannelId: channelId,
+                    targetGroup,
+                  },
+                );
+              }
+            } catch (e) {
+              logger.warn(
+                "Telegram",
+                `Could not prime channel updates via getDialogs (${reason}) - live listener may stay silent until the next prime`,
+                { error: e.message },
+              );
+            }
+          };
           const runAutoFetch = async () => {
             try {
               logger.info(
@@ -2392,6 +2456,9 @@ ${lines.join("\n---\n")}`;
               }
             }
           }, new Raw({}));
+          // Handlers are registered above, so the live NewMessage handler is in
+          // place before priming opens the push stream (no first-update gap).
+          primeChannelUpdates("startup");
           setInterval(
             async () => {
               const WATCHDOG_SILENCE_MS = 30 * 60 * 1e3;
@@ -2411,6 +2478,9 @@ ${lines.join("\n---\n")}`;
                   }
                   await client.connect();
                   logger.info("Watchdog", "Reconnected to Telegram");
+                  // A fresh connection must be re-primed or the live listener
+                  // stays silent after every reconnect (push-only updates).
+                  await primeChannelUpdates("reconnect");
                 } catch (e) {
                   logger.error("Watchdog", "Failed to reconnect", {
                     error: e.message,
