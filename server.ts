@@ -3003,7 +3003,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         const { data: batch, error } = await supabase
           .from("tickets")
           .select(
-            "id, summary, category, urgency, product_area, sentiment, status, raw_text, created_at",
+            "id, summary, category, urgency, product_area, sentiment, status, raw_text, telegram_deep_link, created_at",
           )
           .eq("is_admin_message", false)
           .neq("summary", "Processing message...")
@@ -3037,6 +3037,9 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
               ...nextTicket,
               // show the clean original message, not appended reply blocks
               raw_text: originalMessageText(nextTicket.raw_text),
+              // the untransformed thread (reply blocks included) so the
+              // reviewer can read the full conversation for context
+              full_raw_text: nextTicket.raw_text,
             }
           : null,
         categories: VALID_CATEGORIES,

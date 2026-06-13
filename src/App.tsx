@@ -115,6 +115,8 @@ type TrainTicket = {
   sentiment: string;
   status: string;
   raw_text: string;
+  full_raw_text?: string;
+  telegram_deep_link?: string | null;
   created_at: string;
 };
 
@@ -128,12 +130,14 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
   const [wrongMode, setWrongMode]       = useState(false);
   const [selectedCategory, setSelectedCategory] = useState("");
   const [error, setError]               = useState("");
+  const [showFullConvo, setShowFullConvo] = useState(false);
 
   const loadNext = useCallback(async () => {
     setLoading(true);
     setError("");
     setWrongMode(false);
     setSelectedCategory("");
+    setShowFullConvo(false);
     try {
       const res  = await apiFetch("/api/train/next");
       const data = await res.json();
@@ -196,6 +200,9 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
       </header>
 
       <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 pb-16 w-full">
+        <p className="mb-6 max-w-xl text-center text-sm text-white/60">
+          Review tickets the AI classified — mark them correct or fix the category to help the AI learn over time.
+        </p>
         <div className="mb-6 flex items-center gap-6 text-[11px] uppercase tracking-widest font-bold text-white/40">
           <span><span className="text-indigo-400">{sessionReviewed}</span> reviewed this session</span>
           <span><span className="text-emerald-400">{counts.correctionsLogged}</span> corrections logged</span>
@@ -228,7 +235,33 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
 
             <div className="p-6">
               <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2">User message</p>
-              <p className="text-sm text-white/90 whitespace-pre-wrap bg-white/5 border border-white/10 rounded-xl p-4 mb-5 max-h-56 overflow-y-auto">{ticket.raw_text}</p>
+              <p className="text-sm text-white/90 whitespace-pre-wrap bg-white/5 border border-white/10 rounded-xl p-4 mb-3 max-h-56 overflow-y-auto">{ticket.raw_text}</p>
+
+              {/* Conversation context for the reviewer: full thread + Telegram link */}
+              <div className="flex flex-wrap items-center gap-4 mb-5">
+                {ticket.full_raw_text && ticket.full_raw_text.trim() !== ticket.raw_text.trim() && (
+                  <button
+                    onClick={() => setShowFullConvo(v => !v)}
+                    className="text-xs font-semibold text-indigo-300 hover:text-indigo-200 transition"
+                  >
+                    {showFullConvo ? "Hide full conversation" : "Show full conversation"}
+                  </button>
+                )}
+                {ticket.telegram_deep_link && (
+                  <a
+                    href={ticket.telegram_deep_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs font-semibold text-emerald-300 hover:text-emerald-200 transition"
+                  >
+                    View on Telegram ↗
+                  </a>
+                )}
+              </div>
+
+              {showFullConvo && ticket.full_raw_text && (
+                <p className="text-xs text-white/70 whitespace-pre-wrap bg-black/30 border border-white/10 rounded-xl p-4 mb-5 max-h-72 overflow-y-auto">{ticket.full_raw_text}</p>
+              )}
 
               <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2">AI classified this as</p>
               <div className="inline-flex items-center px-4 py-2 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-bold text-sm mb-6">
@@ -928,6 +961,14 @@ export default function App() {
             </select>
             <ChevronDown className="w-4 h-4 text-white/40 pointer-events-none" />
           </div>
+          <a
+            href="/train"
+            id="open-train"
+            title="Review AI classifications to train the model"
+            className="bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md hover:bg-emerald-500/10 hover:border-emerald-500/30 transition text-[10px] font-bold text-white/50 hover:text-emerald-300 uppercase tracking-widest flex items-center gap-1.5"
+          >
+            🎓 Train the AI
+          </a>
           <button
             id="open-benchmark"
             onClick={() => setShowBenchmark(true)}
