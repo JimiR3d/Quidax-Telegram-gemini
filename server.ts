@@ -18,6 +18,10 @@ import {
   decideClassificationOutcome,
   isCategoryFallback,
 } from "./classification-policy";
+import {
+  recoverQuotedParent,
+  type FetchedParentMessage,
+} from "./quoted-parent";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -1590,58 +1594,140 @@ ${lines.join("\n---\n")}`;
     if (replyToMsgId) {
       if (isAdminSender) {
         try {
+          let parentTicket = null;
           const { data: parentMsg } = await supabase
             .from("messages")
             .select("id")
             .eq("telegram_message_id", String(replyToMsgId))
-            .single();
+            .maybeSingle();
           if (parentMsg) {
-            const { data: parentTicket } = await supabase
+            const { data: pt } = await supabase
               .from("tickets")
               .select("*")
               .eq("message_id", parentMsg.id)
-              .single();
+              .maybeSingle();
+            parentTicket = pt;
+          }
+          // Fix 5: the quoted parent was never ingested (the live listener was
+          // down, or it predates the 2-hour sweep window). Fetch it from
+          // Telegram, ingest it as a ticket, then attach this admin reply —
+          // instead of degrading to a standalone admin "ticket" and losing the
+          // thread (audit 2026-06-12, KNOWN_ISSUES section 6 items 5 & 8). The
+          // fetch is a no-op without a live client (the no-telegram local
+          // launcher), so this falls back to the old behavior there.
+          if (!parentTicket) {
+            parentTicket = await recoverQuotedParent(replyToMsgId, {
+              findTicketByTelegramId: async (id) => {
+                const { data: m } = await supabase
+                  .from("messages")
+                  .select("id")
+                  .eq("telegram_message_id", String(id))
+                  .maybeSingle();
+                if (!m) return null;
+                const { data: t } = await supabase
+                  .from("tickets")
+                  .select("*")
+                  .eq("message_id", m.id)
+                  .maybeSingle();
+                return t ?? null;
+              },
+              fetchQuotedMessage: async (id) => {
+                if (!tlClient) return null; // no live session → safe no-op
+                try {
+                  const fetched = await tlClient.getMessages(targetGroup, {
+                    ids: [Number(id)],
+                  });
+                  const m = fetched && fetched[0];
+                  if (!m || !m.text) return null;
+                  const pSenderId = m.senderId;
+                  const pSenderUsername = (m.sender as any)?.username || "";
+                  const pIsAdmin = await checkIsAdmin(
+                    targetGroup,
+                    pSenderId,
+                    pSenderUsername,
+                  );
+                  const parent: FetchedParentMessage = {
+                    text: String(m.text),
+                    msgId: m.id,
+                    msgDate: m.date,
+                    isAdmin: pIsAdmin,
+                    senderId: String(pSenderId),
+                    senderUsername: pSenderUsername,
+                    deepLink: buildTelegramDeepLink(targetGroup, m.id),
+                  };
+                  return parent;
+                } catch (e) {
+                  logger.warn(
+                    "Ingestion",
+                    `Could not fetch quoted parent ${id} from Telegram`,
+                    { error: e.message },
+                  );
+                  return null;
+                }
+              },
+              // Ingest the parent as a ROOT message (replyToMsgId = null) so
+              // recovery never recurses up an unbounded reply chain.
+              ingestParent: (p) =>
+                processAndIngestMessage(
+                  p.text,
+                  p.msgId,
+                  groupId,
+                  null,
+                  p.msgDate,
+                  p.isAdmin,
+                  p.deepLink,
+                  false,
+                  p.senderId,
+                  p.senderUsername,
+                ),
+            });
             if (parentTicket) {
-              const newRawText =
-                parentTicket.raw_text +
-                `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
-              // Resolved stays Resolved; Escalated / Awaiting User keep their
-              // state (an admin update does not un-escalate a ticket); anything
-              // else moves to In Review. first_admin_reply_at is stamped once,
-              // with the message's own timestamp so backfills stay accurate.
-              await supabase
-                .from("tickets")
-                .update({
-                  raw_text: newRawText,
-                  status: ["Resolved", "Escalated", "Awaiting User"].includes(
-                    parentTicket.status,
-                  )
-                    ? parentTicket.status
-                    : "In Review",
-                  first_admin_reply_at:
-                    parentTicket.first_admin_reply_at ?? msgDateISO,
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", parentTicket.id);
               logger.info(
                 "Ingestion",
-                `Admin reply attached to ticket ${parentTicket.id}`,
+                `Fetched + ingested missing quoted parent ${replyToMsgId} for admin reply ${telegramId}`,
               );
-              extractAndLearnKeywords(supabase, text).catch(() => {});
-              // Fire-and-forget: idempotent because the dedup check at the
-              // top of this function means each reply is processed once.
-              reclassifyFromAdminReply(
-                supabase,
-                parentTicket.id,
-                text,
-                senderHash,
-              ).catch((e) =>
-                logger.error("Reclassify", "Admin-reply reclassification failed", {
-                  error: e.message,
-                }),
-              );
-              return parentTicket;
             }
+          }
+          if (parentTicket) {
+            const newRawText =
+              parentTicket.raw_text +
+              `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
+            // Resolved stays Resolved; Escalated / Awaiting User keep their
+            // state (an admin update does not un-escalate a ticket); anything
+            // else moves to In Review. first_admin_reply_at is stamped once,
+            // with the message's own timestamp so backfills stay accurate.
+            await supabase
+              .from("tickets")
+              .update({
+                raw_text: newRawText,
+                status: ["Resolved", "Escalated", "Awaiting User"].includes(
+                  parentTicket.status,
+                )
+                  ? parentTicket.status
+                  : "In Review",
+                first_admin_reply_at:
+                  parentTicket.first_admin_reply_at ?? msgDateISO,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", parentTicket.id);
+            logger.info(
+              "Ingestion",
+              `Admin reply attached to ticket ${parentTicket.id}`,
+            );
+            extractAndLearnKeywords(supabase, text).catch(() => {});
+            // Fire-and-forget: idempotent because the dedup check at the
+            // top of this function means each reply is processed once.
+            reclassifyFromAdminReply(
+              supabase,
+              parentTicket.id,
+              text,
+              senderHash,
+            ).catch((e) =>
+              logger.error("Reclassify", "Admin-reply reclassification failed", {
+                error: e.message,
+              }),
+            );
+            return parentTicket;
           }
         } catch (err) {
           logger.error(
