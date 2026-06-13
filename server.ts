@@ -2397,6 +2397,9 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
   app.get("/api/health", (_req, res) => {
     res.json({
       status: "ok",
+      // Railway injects RAILWAY_GIT_COMMIT_SHA at build time, so this tells you
+      // exactly which commit production is running. Shows "local" off-platform.
+      commit: process.env.RAILWAY_GIT_COMMIT_SHA || "local",
       circuits: [
         groqBreaker.getStatus(),
         geminiBreaker.getStatus(),
