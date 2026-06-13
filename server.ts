@@ -14,6 +14,10 @@ import {
   extractUpdateChannelId,
   updateTargetsChannel,
 } from "./telegram-guards";
+import {
+  decideClassificationOutcome,
+  isCategoryFallback,
+} from "./classification-policy";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -299,11 +303,19 @@ function normalizeCategory(cat) {
 function parseAndValidateClassification(jsonStr) {
   try {
     const raw = JSON.parse(jsonStr);
+    const rawCategory = raw.category;
     if (raw.priority && !raw.urgency) raw.urgency = raw.priority;
     if (raw.category) raw.category = normalizeCategory(raw.category);
-    return TicketClassificationSchema.parse(raw);
+    const parsed = TicketClassificationSchema.parse(raw);
+    // A "General Question" the model never actually said (missing/invalid
+    // category that Zod .catch or normalizeCategory defaulted) is a fumbled
+    // classification, not a real one — flag it so it is never auto-dismissed.
+    return {
+      ...parsed,
+      classification_failed: isCategoryFallback(parsed.category, rawCategory),
+    };
   } catch {
-    return CLASSIFICATION_FALLBACK;
+    return { ...CLASSIFICATION_FALLBACK, classification_failed: true };
   }
 }
 var ISSUE_SIGNALS = [
@@ -1895,37 +1907,23 @@ ${lines.join("\n---\n")}`;
           ticketData = parseAndValidateClassification(jsonStr);
           suggestedReply = await generateSuggestedReply(text, ticketData);
         }
-        const needsEscalation = ticketData.urgency === "Critical";
-        const isAutoDismiss = [
-          "Praise",
-          "Spam/Irrelevant",
-          "General Question",
-          "Other",
-        ].includes(ticketData.category);
-        const finalStatus = isAdminSender
-          ? "Resolved"
-          : isResolution
-          ? "Resolved"
-          : isPreFiltered || isAutoDismiss
-            ? "Dismissed"
-            : needsEscalation
-              ? "In Review"
-              : "Open";
-        const finalSummary = needsEscalation
-          ? `[ESCALATED] ${ticketData.summary}`
-          : ticketData.summary;
+        const outcome = decideClassificationOutcome(ticketData, {
+          isAdminSender: !!isAdminSender,
+          isResolution,
+          isPreFiltered,
+        });
         await applyClassification(
           {
-            summary: finalSummary,
+            summary: outcome.summary,
             category: ticketData.category,
-            urgency: ticketData.urgency,
+            urgency: outcome.urgency,
             product_area: ticketData.product_area,
             sentiment: ticketData.sentiment,
             is_complaint: ticketData.is_complaint,
             suggested_action: ticketData.suggested_action,
             suggested_reply: suggestedReply || null,
           },
-          finalStatus,
+          outcome.status,
         );
         logger.info("Classification", `Ticket ${dbTicket.id} classified`, {
           urgency: ticketData.urgency,
@@ -1971,23 +1969,23 @@ ${lines.join("\n---\n")}`;
           const jsonStr = response.response.text().trim() || "{}";
           const ticketData = parseAndValidateClassification(jsonStr);
           const suggestedReply = await generateSuggestedReply(text, ticketData);
-          const needsEscalation = ticketData.urgency === "Critical";
-          const finalStatus = isAdminSender ? "Resolved" : needsEscalation ? "In Review" : "Open";
-          const finalSummary = needsEscalation
-            ? `[ESCALATED] ${ticketData.summary}`
-            : ticketData.summary;
+          const outcome = decideClassificationOutcome(ticketData, {
+            isAdminSender: !!isAdminSender,
+            isResolution,
+            isPreFiltered,
+          });
           await applyClassification(
             {
-              summary: finalSummary,
+              summary: outcome.summary,
               category: ticketData.category,
-              urgency: ticketData.urgency,
+              urgency: outcome.urgency,
               product_area: ticketData.product_area,
               sentiment: ticketData.sentiment,
               is_complaint: ticketData.is_complaint,
               suggested_action: ticketData.suggested_action,
               suggested_reply: suggestedReply || null,
             },
-            finalStatus,
+            outcome.status,
           );
           logger.info(
             "Classification",
@@ -2000,8 +1998,10 @@ ${lines.join("\n---\n")}`;
             `Background classification (Gemini Fallback) failed for ticket ${dbTicket.id}`,
             { error: geminiErr.message },
           );
+          // Both LLMs failed: keep the ticket Open and flagged for a human —
+          // a lost classification must never be dismissed and hidden.
           await applyClassification(
-            { summary: "Classification failed - manual review needed." },
+            { summary: "[NEEDS REVIEW] Classification failed - manual review needed." },
             isAdminSender ? "Resolved" : "Open",
           ).catch((updateErr) =>
             logger.error(
