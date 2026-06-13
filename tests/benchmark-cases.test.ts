@@ -21,8 +21,8 @@ const VALID_CATEGORIES = [
 const VALID_URGENCIES = ["Critical", "High", "Medium", "Low"];
 
 describe("benchmark-cases — the gold fixture that ships to production", () => {
-  it("has exactly 12 cases", () => {
-    expect(BENCHMARK_CASES).toHaveLength(12);
+  it("has exactly 18 cases (12 English + 6 Pidgin)", () => {
+    expect(BENCHMARK_CASES).toHaveLength(18);
   });
 
   it("has unique ids", () => {
@@ -54,6 +54,23 @@ describe("benchmark-cases — the gold fixture that ships to production", () => 
       expect(typeof c.id).toBe("number");
       expect(typeof c.description).toBe("string");
       expect(typeof c.expectedIsComplaint).toBe("boolean");
+    }
+  });
+
+  it("includes at least 4 Pidgin cases covering the KNOWN_ISSUES §3 phrases", () => {
+    const all = BENCHMARK_CASES.map((c) => c.message).join("\n");
+    expect(all).toMatch(/abeg/i);
+    expect(all).toMatch(/money never enter|e never enter|never enter/i);
+    expect(all).toMatch(/dem block|block my account/i);
+    expect(all).toMatch(/e don do/i);
+  });
+
+  it("Pidgin cases have valid categories and urgencies", () => {
+    const pidginCases = BENCHMARK_CASES.filter((c) => c.id >= 13);
+    expect(pidginCases.length).toBe(6);
+    for (const c of pidginCases) {
+      expect(VALID_CATEGORIES).toContain(c.expectedCategory);
+      expect(VALID_URGENCIES).toContain(c.expectedUrgency);
     }
   });
 });

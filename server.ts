@@ -29,6 +29,7 @@ import {
 } from "./listener-health";
 import { BENCHMARK_CASES } from "./benchmark-cases";
 import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
+import { PIDGIN_GLOSSARY_PROMPT } from "./pidgin-glossary";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -1122,7 +1123,7 @@ Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Jus
 - BVN = Bank Verification Number. NIN = National Identity Number. Used for KYC in Nigeria.
 - "Processing" for >24h on a withdrawal = High urgency. >72h = Critical.
 
-Classify the user message below. Do NOT default to General Question unless the user is genuinely only asking for information.`;
+Classify the user message below. Do NOT default to General Question unless the user is genuinely only asking for information.${PIDGIN_GLOSSARY_PROMPT}`;
   // Milestone 3: when an admin's reply implies the AI picked the wrong
   // category, silently fix the ticket and record the correction in the
   // corrections table (few-shot injection reads that table to learn).

@@ -9,10 +9,11 @@
  * exactly why the production benchmark modal was returning total:0 (KNOWN_ISSUES
  * §6 item 6, Fix 7).
  *
- * NOTE: these cases are Quidax-representative but contain NO Nigerian Pidgin
- * (e.g. "e don do", "dem block my account"). Pidgin classification coverage is
- * a known gap (KNOWN_ISSUES §3) and is deliberately out of scope here — this
- * fix only makes the existing English benchmark deploy and render correctly.
+ * Cases 1-12 are Quidax-representative English. Cases 13-18 are Nigerian
+ * Pidgin English, added to close the measurement gap documented in
+ * KNOWN_ISSUES §3 ("e don do", "dem block my account", "money never enter",
+ * "abeg help me"). The Pidgin glossary prompt in pidgin-glossary.ts is
+ * what makes them classify correctly; this file only measures the result.
  *
  * Every `expectedCategory` must stay within VALID_CATEGORIES and every
  * `expectedUrgency` within VALID_URGENCIES in server.ts; tests/benchmark-cases.test.ts
@@ -135,5 +136,64 @@ export const BENCHMARK_CASES: BenchmarkCase[] = [
     expectedCategory: "Network/Downtime",
     expectedUrgency: "High",
     expectedIsComplaint: true,
+  },
+
+  // ── Cases 13-18: Nigerian Pidgin English (KNOWN_ISSUES §3) ────────────────
+  // These measure whether the Pidgin glossary in pidgin-glossary.ts enables
+  // correct classification. Wording deliberately differs from the worked
+  // examples in PIDGIN_GLOSSARY_PROMPT so /api/eval tests generalisation.
+  {
+    id: 13,
+    description: "Pidgin — withdrawal stuck",
+    message:
+      "Abeg help me o, my withdrawal don hang since yesterday, e still dey 'processing', I need the money urgent",
+    expectedCategory: "Withdrawal Issue",
+    expectedUrgency: "High",
+    expectedIsComplaint: true,
+  },
+  {
+    id: 14,
+    description: "Pidgin — deposit not credited",
+    message:
+      "I don send 200 USDT TRC20 since two hours but the money never enter my Quidax wallet, nothing show for balance",
+    expectedCategory: "Deposit Issue",
+    expectedUrgency: "High",
+    expectedIsComplaint: true,
+  },
+  {
+    id: 15,
+    description: "Pidgin — account blocked",
+    message:
+      "Dem block my account since this morning, I no fit login and my money dey inside, abeg help me unlock am",
+    expectedCategory: "Account Access",
+    expectedUrgency: "High",
+    expectedIsComplaint: true,
+  },
+  {
+    id: 16,
+    description: "Pidgin — KYC pending",
+    message:
+      "I don submit my NIN for Tier 2 since three days, my account still dey Tier 1, when e go update?",
+    expectedCategory: "KYC/Verification",
+    expectedUrgency: "Medium",
+    expectedIsComplaint: false,
+  },
+  {
+    id: 17,
+    description: "Pidgin — app crash",
+    message:
+      "Anytime I tap Portfolio the app go just close. E don do, abeg fix am.",
+    expectedCategory: "App Bug",
+    expectedUrgency: "Medium",
+    expectedIsComplaint: true,
+  },
+  {
+    id: 18,
+    description: "Pidgin — praise",
+    message:
+      "Quidax na correct exchange! My withdrawal enter sharp sharp, una too much 🚀",
+    expectedCategory: "Praise",
+    expectedUrgency: "Low",
+    expectedIsComplaint: false,
   },
 ];
