@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   extractUpdateChannelId,
   updateTargetsChannel,
+  describeUpdate,
 } from "../telegram-guards";
 
 const TARGET = "1234567890";
@@ -90,5 +91,81 @@ describe("edit/delete updates are matched to the target group only", () => {
         TARGET,
       ),
     ).toBe(false);
+  });
+});
+
+describe("describeUpdate (LISTENER_DEBUG diagnostic summary)", () => {
+  it("summarises the UpdateChannelTooLong the spike is hunting for", () => {
+    // The leading hypothesis: a busy supergroup is pushed UpdateChannelTooLong
+    // (with channelId + pts), which GramJS 2.26.x silently drops.
+    const summary = describeUpdate({
+      className: "UpdateChannelTooLong",
+      channelId: "2129818880",
+      pts: 5000,
+    });
+    expect(summary).toEqual({
+      className: "UpdateChannelTooLong",
+      channelId: "2129818880",
+      pts: 5000,
+      ptsCount: null,
+    });
+  });
+
+  it("extracts the channel id of a new channel message from peerId, with pts", () => {
+    const summary = describeUpdate({
+      className: "UpdateNewChannelMessage",
+      message: {
+        id: 139700,
+        message: "secret user text that must not be logged",
+        peerId: { className: "PeerChannel", channelId: "2129818880" },
+      },
+      pts: 5001,
+      ptsCount: 1,
+    });
+    expect(summary.className).toBe("UpdateNewChannelMessage");
+    expect(summary.channelId).toBe("2129818880");
+    expect(summary.pts).toBe(5001);
+    expect(summary.ptsCount).toBe(1);
+    // Never surface the message body.
+    expect(JSON.stringify(summary)).not.toContain("secret user text");
+  });
+
+  it("reuses the edit/delete extraction for channel edit updates", () => {
+    expect(describeUpdate(editUpdate("2129818880")).channelId).toBe(
+      "2129818880",
+    );
+    expect(describeUpdate(deleteUpdate("2129818880")).channelId).toBe(
+      "2129818880",
+    );
+  });
+
+  it("carries className but no channel id for an unrelated DM update", () => {
+    const summary = describeUpdate({
+      className: "UpdateShortMessage",
+      userId: "42",
+      message: "a DM",
+    });
+    expect(summary.className).toBe("UpdateShortMessage");
+    expect(summary.channelId).toBe(null);
+  });
+
+  it("normalises GramJS BigInteger channel ids to strings", () => {
+    expect(
+      describeUpdate({
+        className: "UpdateChannelTooLong",
+        channelId: BigInt("2129818880"),
+      }).channelId,
+    ).toBe("2129818880");
+  });
+
+  it("never throws on null/garbage updates", () => {
+    expect(describeUpdate(null)).toEqual({
+      className: null,
+      channelId: null,
+      pts: null,
+      ptsCount: null,
+    });
+    expect(describeUpdate(undefined).className).toBe(null);
+    expect(describeUpdate(12345).channelId).toBe(null);
   });
 });

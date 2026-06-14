@@ -13,6 +13,7 @@ import { z } from "zod";
 import {
   extractUpdateChannelId,
   updateTargetsChannel,
+  describeUpdate,
 } from "./telegram-guards";
 import {
   decideClassificationOutcome,
@@ -2498,6 +2499,35 @@ ${lines.join("\n---\n")}`;
               }
             }
           }, new Raw({}));
+          // ── Research spike (live-listener): LISTENER_DEBUG ────────────────
+          // The live NewMessage handler delivers NOTHING from the target
+          // supergroup even though the account is a member and getDialogs()
+          // priming succeeds (Fix 10 verdict, 2026-06-14). GramJS 2.26.x has no
+          // getChannelDifference / UpdateChannelTooLong handling, so we are
+          // blind to what Telegram actually pushes over the live socket. When
+          // LISTENER_DEBUG is on, log METADATA ONLY (className/channelId/pts —
+          // never message text, per the never-log-PII rule) for EVERY update,
+          // so a short production window reveals whether the channel's
+          // UpdateNewChannelMessage ever arrives or is replaced by an
+          // UpdateChannelTooLong that GramJS silently drops. Default OFF → fully
+          // inert (the handler is only registered when the flag is set, so there
+          // is zero overhead and rollback is just unsetting the env var). Purely
+          // additive — it never writes to the DB and touches no other handler.
+          const LISTENER_DEBUG = process.env.LISTENER_DEBUG === "true";
+          if (LISTENER_DEBUG) {
+            logger.info(
+              "ListenerDebug",
+              "LISTENER_DEBUG active - logging metadata for every update (no message text)",
+              { targetGroup, targetChannelId },
+            );
+            client.addEventHandler((update: any) => {
+              try {
+                logger.info("ListenerDebug", "update", describeUpdate(update));
+              } catch (e) {
+                // Diagnostics must never affect the live process.
+              }
+            }, new Raw({}));
+          }
           // Handlers are registered above, so the live NewMessage handler is in
           // place before priming opens the push stream (no first-update gap).
           primeChannelUpdates("startup");

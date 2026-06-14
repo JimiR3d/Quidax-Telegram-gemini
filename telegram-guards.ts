@@ -37,3 +37,43 @@ export function updateTargetsChannel(
   const chanId = extractUpdateChannelId(update);
   return chanId !== null && chanId === targetChannelId;
 }
+
+// Diagnostic-only summary of ANY update, for the LISTENER_DEBUG logger in
+// server.ts (live-listener research spike). The live NewMessage handler
+// delivers nothing from the target supergroup even though the account is a
+// member and getDialogs() priming succeeds (Fix 10 verdict, 2026-06-14), and
+// GramJS 2.26.x has no getChannelDifference / UpdateChannelTooLong handling, so
+// we are blind to what Telegram actually pushes. This lets a short production
+// window reveal whether the channel's UpdateNewChannelMessage arrives or is
+// replaced by an UpdateChannelTooLong that GramJS silently drops.
+//
+// METADATA ONLY — never the message body (audit rule: never log raw PII).
+export interface UpdateSummary {
+  className: string | null;
+  channelId: string | null;
+  pts: number | null;
+  ptsCount: number | null;
+}
+
+export function describeUpdate(update: any): UpdateSummary {
+  if (!update) {
+    return { className: null, channelId: null, pts: null, ptsCount: null };
+  }
+  const className =
+    typeof update.className === "string" ? update.className : null;
+  // Reuse the tested edit/delete extraction, then broaden it to the channel
+  // update types this spike cares about: new-message (peerId.channelId) and the
+  // "too long" / generic channel updates that carry a top-level channelId.
+  let channelId = extractUpdateChannelId(update);
+  if (channelId === null) {
+    const peerChanId = update.message?.peerId?.channelId;
+    if (peerChanId != null) {
+      channelId = String(peerChanId);
+    } else if (update.channelId != null) {
+      channelId = String(update.channelId);
+    }
+  }
+  const pts = typeof update.pts === "number" ? update.pts : null;
+  const ptsCount = typeof update.ptsCount === "number" ? update.ptsCount : null;
+  return { className, channelId, pts, ptsCount };
+}
