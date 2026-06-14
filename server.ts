@@ -30,6 +30,12 @@ import {
 } from "./listener-health";
 import { findTargetInDialogs } from "./dialog-priming";
 import { selectMessagesToIngest, sweepCandidateIds } from "./autofetch-dedup";
+import {
+  classifyChannelDifference,
+  buildUsernameMap,
+  normalizeDiffMessage,
+  sortDiffMessagesOldestFirst,
+} from "./channel-difference";
 import { BENCHMARK_CASES } from "./benchmark-cases";
 import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
 import { PIDGIN_GLOSSARY_PROMPT } from "./pidgin-glossary";
@@ -2264,6 +2270,167 @@ ${lines.join("\n---\n")}`;
               );
             }
           };
+          // ── Phase 2: getChannelDifference live ingestion ──────────────────
+          // GramJS 2.26.x never syncs the supergroup's channel pts, so Telegram
+          // WITHHOLDS its UpdateNewChannelMessage from the live NewMessage
+          // handler (root cause PROVEN 2026-06-14, KNOWN_ISSUES §6 item 1,
+          // diagnostic commit 1f110a5). The fix: actively track the channel pts
+          // and poll updates.GetChannelDifference, feeding new messages into the
+          // SAME idempotent processAndIngestMessage. Additive to AutoFetch (which
+          // stays the safety net); ships behind CHANNEL_DIFF_ENABLED (default
+          // OFF, like LISTENER_DEBUG) so it is fully inert until enabled in prod.
+          // Response-shape + raw-message normalization live in the pure module
+          // channel-difference.ts.
+          const CHANNEL_DIFF_ENABLED =
+            process.env.CHANNEL_DIFF_ENABLED === "true";
+          let trackedChannelPts: number | null = null;
+          let channelDiffPolling = false;
+          // Seed (or re-seed) the tracked channel pts from the server's current
+          // state. Re-seeding to "now" intentionally skips any gap (AutoFetch's
+          // 2h lookback carries it) — the same "never bulk-ingest history" stance
+          // as the TooLong branch. Fail-safe: on error leave the pts null and the
+          // next poll retries the seed.
+          const seedChannelPts = async (reason: string) => {
+            try {
+              const { Api } = await import("telegram");
+              const full: any = await client.invoke(
+                new Api.channels.GetFullChannel({ channel: targetGroup }),
+              );
+              const pts = Number(full?.fullChat?.pts);
+              if (Number.isFinite(pts)) {
+                trackedChannelPts = pts;
+                logger.info("ChannelDiff", `Seeded channel pts (${reason})`, {
+                  pts: trackedChannelPts,
+                  targetGroup,
+                });
+              } else {
+                logger.warn(
+                  "ChannelDiff",
+                  `Seed (${reason}) returned no usable pts - will retry next poll`,
+                );
+              }
+            } catch (e) {
+              logger.warn(
+                "ChannelDiff",
+                `Could not seed channel pts (${reason}) - will retry next poll`,
+                { error: e.message },
+              );
+            }
+          };
+          // Poll updates.GetChannelDifference once; drain a multi-page gap within
+          // a bounded loop. Re-entrancy-guarded so a slow poll never overlaps the
+          // next 15s tick. Fail-safe: any error logs and the next tick retries.
+          const pollChannelDifference = async () => {
+            if (!CHANNEL_DIFF_ENABLED) return;
+            if (channelDiffPolling) return;
+            channelDiffPolling = true;
+            try {
+              if (trackedChannelPts == null) {
+                await seedChannelPts("poll");
+                if (trackedChannelPts == null) return;
+              }
+              const { Api } = await import("telegram");
+              // Bound the drain so a pathological response can never spin the
+              // loop; a real gap is one 15s window, so this rarely loops twice.
+              for (let i = 0; i < 10; i++) {
+                const resp: any = await client.invoke(
+                  new Api.updates.GetChannelDifference({
+                    channel: targetGroup,
+                    filter: new Api.ChannelMessagesFilterEmpty(),
+                    pts: trackedChannelPts as number,
+                    limit: 100,
+                  }),
+                );
+                const c = classifyChannelDifference(resp);
+                if (c.kind === "messages") {
+                  const usernameMap = buildUsernameMap(resp.users);
+                  const normalized = sortDiffMessagesOldestFirst(
+                    c.messages
+                      .map((m) => normalizeDiffMessage(m, usernameMap))
+                      .filter((m) => m !== null),
+                  );
+                  let newlyIngested = 0;
+                  for (const m of normalized) {
+                    try {
+                      const admin = await checkIsAdmin(
+                        targetGroup,
+                        m.senderId,
+                        m.senderUsername,
+                      );
+                      const deepLink = buildTelegramDeepLink(targetGroup, m.id);
+                      const result = await processAndIngestMessage(
+                        m.text,
+                        m.id,
+                        targetGroup,
+                        m.replyToMsgId,
+                        m.date,
+                        admin,
+                        deepLink,
+                        false,
+                        m.senderId ? String(m.senderId) : "",
+                        m.senderUsername,
+                      );
+                      if (result !== null) newlyIngested++;
+                    } catch (e) {
+                      logger.warn("ChannelDiff", `Skipped message ${m.id}`, {
+                        error: e.message,
+                      });
+                    }
+                    // Free-tier Groq spacing, identical to AutoFetch. New
+                    // messages are few, so this is cheap.
+                    await new Promise((r) => setTimeout(r, 2100));
+                  }
+                  if (normalized.length > 0) {
+                    // Genuine live delivery over the diff stream: stamp the
+                    // watchdog clock (keeps it asleep while live ingestion works,
+                    // exactly like the NewMessage handler) and emit the
+                    // success-criteria line. newlyIngested < count just means
+                    // AutoFetch already had some — expected, harmless overlap
+                    // (the top-of-function dedup makes it idempotent).
+                    lastMessageReceivedAt = Date.now();
+                    logger.info(
+                      "ChannelDiff",
+                      "Live channel message via getChannelDifference",
+                      {
+                        count: normalized.length,
+                        newlyIngested,
+                        newPts: c.newPts,
+                      },
+                    );
+                  }
+                  if (c.newPts != null) trackedChannelPts = c.newPts;
+                  if (c.final) break;
+                } else if (c.kind === "empty") {
+                  if (c.newPts != null) trackedChannelPts = c.newPts;
+                  break;
+                } else if (c.kind === "tooLong") {
+                  // The gap is too large to page and the response's messages are
+                  // latest-state, NOT the gap — so we must NOT bulk-ingest. Just
+                  // re-seed the pts; AutoFetch's 2h lookback carries the gap.
+                  logger.warn(
+                    "ChannelDiff",
+                    "ChannelDifferenceTooLong - skipping history, AutoFetch carries the gap",
+                    { newPts: c.newPts },
+                  );
+                  if (c.newPts != null) trackedChannelPts = c.newPts;
+                  break;
+                } else {
+                  logger.warn(
+                    "ChannelDiff",
+                    "Unexpected getChannelDifference response - leaving pts unchanged",
+                    { className: resp?.className },
+                  );
+                  break;
+                }
+              }
+            } catch (e) {
+              logger.error("ChannelDiff", "Error polling getChannelDifference", {
+                error: e.message,
+              });
+            } finally {
+              channelDiffPolling = false;
+            }
+          };
           const runAutoFetch = async () => {
             try {
               logger.info(
@@ -2531,6 +2698,16 @@ ${lines.join("\n---\n")}`;
           // Handlers are registered above, so the live NewMessage handler is in
           // place before priming opens the push stream (no first-update gap).
           primeChannelUpdates("startup");
+          // Phase 2: start the getChannelDifference poll only when enabled.
+          // Default OFF → this whole path is inert and behavior is unchanged.
+          if (CHANNEL_DIFF_ENABLED) {
+            logger.info(
+              "ChannelDiff",
+              "CHANNEL_DIFF_ENABLED - starting getChannelDifference poll (15s) alongside AutoFetch",
+            );
+            seedChannelPts("startup");
+            setInterval(pollChannelDifference, 15 * 1e3);
+          }
           setInterval(
             async () => {
               const WATCHDOG_SILENCE_MS = 30 * 60 * 1e3;
@@ -2553,6 +2730,10 @@ ${lines.join("\n---\n")}`;
                   // A fresh connection must be re-primed or the live listener
                   // stays silent after every reconnect (push-only updates).
                   await primeChannelUpdates("reconnect");
+                  // Re-seed the channel pts after a reconnect so the diff poll
+                  // resumes from current state (skips the disconnect-window gap;
+                  // AutoFetch's 2h lookback carries it). No-op when disabled.
+                  if (CHANNEL_DIFF_ENABLED) await seedChannelPts("reconnect");
                   // Back the watchdog off to its intended ~30-min cadence after a
                   // reconnect. Only live TARGET-group messages advance this clock
                   // (Fix 6), and live push is currently NOT delivering (Fix 10
