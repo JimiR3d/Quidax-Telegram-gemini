@@ -28,6 +28,7 @@ import {
   shouldReconnect,
 } from "./listener-health";
 import { findTargetInDialogs } from "./dialog-priming";
+import { selectMessagesToIngest, sweepCandidateIds } from "./autofetch-dedup";
 import { BENCHMARK_CASES } from "./benchmark-cases";
 import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
 import { PIDGIN_GLOSSARY_PROMPT } from "./pidgin-glossary";
@@ -2277,9 +2278,43 @@ ${lines.join("\n---\n")}`;
               // append in chronological order.
               messages.reverse();
               const cutoffDate = Math.floor(Date.now() / 1e3) - 2 * 60 * 60;
-              for (const msg of messages) {
-                if (!msg || !msg.text) continue;
-                if (msg.date < cutoffDate) continue;
+              // Cheap batched pre-dedup so the short sweep interval stays
+              // affordable: look up which of this window's telegram ids are
+              // ALREADY ingested in ONE query, then skip them before the
+              // per-message checkIsAdmin (a Telegram round-trip) and the 2.1s
+              // Groq-spacing sleep. The authoritative idempotent dedup still
+              // lives at the top of processAndIngestMessage; this only trims the
+              // re-walked-window overhead (the sweep used to checkIsAdmin + sleep
+              // 2.1s on all 20 messages every pass, mostly duplicates). Fail-open:
+              // if the lookup errors we process the full window and the
+              // in-function dedup still prevents any double-ingest.
+              const candidateIds = sweepCandidateIds(messages as any, cutoffDate);
+              let alreadyIngested = new Set<string>();
+              if (candidateIds.length) {
+                try {
+                  const { data: existing } = await getSupabase()
+                    .from("messages")
+                    .select("telegram_message_id")
+                    .in("telegram_message_id", candidateIds);
+                  alreadyIngested = new Set(
+                    (existing || []).map((r: any) =>
+                      String(r.telegram_message_id),
+                    ),
+                  );
+                } catch (e) {
+                  logger.warn(
+                    "AutoFetch",
+                    "Pre-dedup lookup failed - processing full window (in-function dedup still applies)",
+                    { error: e.message },
+                  );
+                }
+              }
+              const toProcess = selectMessagesToIngest(
+                messages as any,
+                alreadyIngested,
+                cutoffDate,
+              ) as any[];
+              for (const msg of toProcess) {
                 try {
                   const id = msg.id || Math.floor(Math.random() * 1e7);
                   const replyToMsgId =
@@ -2315,7 +2350,14 @@ ${lines.join("\n---\n")}`;
             }
           };
           runAutoFetch();
-          setInterval(runAutoFetch, 15 * 60 * 1e3);
+          // AutoFetch is the PRIMARY ingestion path: the live NewMessage listener
+          // does not deliver this supergroup's messages even after Fix 10 priming
+          // (account is a member, priming succeeds, but GramJS 2.26.x never pushes
+          // the channel's updates — KNOWN_ISSUES §6 item 1, verified 2026-06-14).
+          // Run every 3 min (was 15) to cut ingest lag from ~180-400s toward
+          // ~60-180s and reduce the chance the limit:20 window misses a burst.
+          // The batched pre-dedup above keeps a short interval cheap.
+          setInterval(runAutoFetch, 3 * 60 * 1e3);
           client.addEventHandler(async (event) => {
             const message = event.message;
             if (!message || !message.text) return;
@@ -2481,6 +2523,16 @@ ${lines.join("\n---\n")}`;
                   // A fresh connection must be re-primed or the live listener
                   // stays silent after every reconnect (push-only updates).
                   await primeChannelUpdates("reconnect");
+                  // Back the watchdog off to its intended ~30-min cadence after a
+                  // reconnect. Only live TARGET-group messages advance this clock
+                  // (Fix 6), and live push is currently NOT delivering (Fix 10
+                  // verified 2026-06-14: priming succeeds + the account is a member,
+                  // but the supergroup's updates still never reach the handler), so
+                  // without this reset silence stays >30min forever and the watchdog
+                  // force-reconnects every 5 minutes indefinitely (observed live).
+                  // A genuinely dead connection still trips again in ~30min; GramJS
+                  // connectionRetries handles real socket drops in between.
+                  lastMessageReceivedAt = Date.now();
                 } catch (e) {
                   logger.error("Watchdog", "Failed to reconnect", {
                     error: e.message,
