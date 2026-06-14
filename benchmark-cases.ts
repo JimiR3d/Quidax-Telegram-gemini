@@ -1,5 +1,5 @@
 /**
- * PulseDesk classification benchmark — the 12 gold test cases.
+ * PulseDesk classification benchmark — the gold test cases.
  *
  * Single source of truth for the AI-accuracy benchmark, used by the
  * `/api/eval` endpoint (server.ts) and the `eval.ts` CLI. Lives as a committed
@@ -14,6 +14,9 @@
  * KNOWN_ISSUES §3 ("e don do", "dem block my account", "money never enter",
  * "abeg help me"). The Pidgin glossary prompt in pidgin-glossary.ts is
  * what makes them classify correctly; this file only measures the result.
+ * Cases 19-20 are feature-existence / capability questions (Bug 4b) that must
+ * classify as General Question, not a problem category; the disambiguation
+ * lives in GROQ_SYSTEM_PROMPT (server.ts), this file only measures the result.
  *
  * Every `expectedCategory` must stay within VALID_CATEGORIES and every
  * `expectedUrgency` within VALID_URGENCIES in server.ts; tests/benchmark-cases.test.ts
@@ -193,6 +196,31 @@ export const BENCHMARK_CASES: BenchmarkCase[] = [
     message:
       "Quidax na correct exchange! My withdrawal enter sharp sharp, una too much 🚀",
     expectedCategory: "Praise",
+    expectedUrgency: "Low",
+    expectedIsComplaint: false,
+  },
+
+  // ── Cases 19-20: feature-existence / capability questions (Bug 4b) ────────
+  // A question about whether a feature exists or an action is allowed, with no
+  // problem reported, is a General Question — not a Trading/Withdrawal/Deposit
+  // problem. Confirmed live miss: "can I send money from my wallet to another?"
+  // was classified Trading Problem. Wording differs from the GROQ_SYSTEM_PROMPT
+  // examples so /api/eval measures generalisation, not memorisation.
+  {
+    id: 19,
+    description: "Feature-existence — wallet-to-wallet send (capability, no problem)",
+    message:
+      "Hello, is it possible to transfer my coins from Quidax to my Trust Wallet address?",
+    expectedCategory: "General Question",
+    expectedUrgency: "Low",
+    expectedIsComplaint: false,
+  },
+  {
+    id: 20,
+    description: "Feature-existence — recurring buys (capability, no problem)",
+    message:
+      "Please does Quidax support automatic recurring buys, like buying BTC every month on its own?",
+    expectedCategory: "General Question",
     expectedUrgency: "Low",
     expectedIsComplaint: false,
   },

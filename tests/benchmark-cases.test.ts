@@ -21,8 +21,8 @@ const VALID_CATEGORIES = [
 const VALID_URGENCIES = ["Critical", "High", "Medium", "Low"];
 
 describe("benchmark-cases — the gold fixture that ships to production", () => {
-  it("has exactly 18 cases (12 English + 6 Pidgin)", () => {
-    expect(BENCHMARK_CASES).toHaveLength(18);
+  it("has exactly 20 cases (12 English + 6 Pidgin + 2 feature-existence)", () => {
+    expect(BENCHMARK_CASES).toHaveLength(20);
   });
 
   it("has unique ids", () => {
@@ -66,11 +66,19 @@ describe("benchmark-cases — the gold fixture that ships to production", () => 
   });
 
   it("Pidgin cases have valid categories and urgencies", () => {
-    const pidginCases = BENCHMARK_CASES.filter((c) => c.id >= 13);
+    const pidginCases = BENCHMARK_CASES.filter((c) => c.id >= 13 && c.id <= 18);
     expect(pidginCases.length).toBe(6);
     for (const c of pidginCases) {
       expect(VALID_CATEGORIES).toContain(c.expectedCategory);
       expect(VALID_URGENCIES).toContain(c.expectedUrgency);
+    }
+  });
+
+  it("includes feature-existence cases (Bug 4b) expecting General Question", () => {
+    const featureCases = BENCHMARK_CASES.filter((c) => c.id >= 19);
+    expect(featureCases.length).toBe(2);
+    for (const c of featureCases) {
+      expect(c.expectedCategory).toBe("General Question");
     }
   });
 });

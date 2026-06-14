@@ -21,6 +21,11 @@ import {
 } from "./classification-policy";
 import { disposeUnattachedMessage } from "./admin-message-policy";
 import {
+  parseReclassifyVerdict,
+  shouldResolveFromAdminReply,
+  AUTO_RESOLVABLE_STATUSES,
+} from "./admin-reply-resolution";
+import {
   recoverQuotedParent,
   type FetchedParentMessage,
 } from "./quoted-parent";
@@ -1111,7 +1116,7 @@ Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Jus
 - "App Bug"           - app crash, UI error, feature broken, platform glitch
 - "Fee Complaint"     - charged wrong fee, unexpected deduction, fee dispute
 - "Network/Downtime"  - platform down, cannot connect, widespread login failure
-- "General Question"  - asking for information only, no problem reported (e.g. "what is the withdrawal limit?")
+- "General Question"  - asking for information, or whether a feature exists / an action is allowed, with no problem reported (e.g. "what is the withdrawal limit?", "can I send crypto to an external wallet?", "is it possible to convert USDT to Naira?")
 - "Praise"            - positive feedback, compliment, no issue
 - "Spam/Irrelevant"   - greetings, off-topic, emojis only, price discussion
 
@@ -1132,6 +1137,7 @@ Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Jus
 - TRC20/BEP20/ERC20 = crypto network types for USDT deposits.
 - BVN = Bank Verification Number. NIN = National Identity Number. Used for KYC in Nigeria.
 - "Processing" for >24h on a withdrawal = High urgency. >72h = Critical.
+- A question about whether a feature exists or an action is allowed ("can I...?", "is it possible to...?", "does Quidax support...?", "am I able to...?") with NO problem reported is a "General Question" — NOT "Trading Problem", "Withdrawal Issue", or "Deposit Issue". Only use a problem category when the user reports something failing, stuck, missing, or wrong.
 
 Classify the user message below. Do NOT default to General Question unless the user is genuinely only asking for information.${PIDGIN_GLOSSARY_PROMPT}`;
   // Milestone 3: when an admin's reply implies the AI picked the wrong
@@ -1141,9 +1147,13 @@ Classify the user message below. Do NOT default to General Question unless the u
 
 Valid categories: ${VALID_CATEGORIES.join(", ")}.
 
-If the admin's reply clearly shows the assigned category is wrong, output the correct one. If the admin's reply is generic (a greeting, "we are looking into it", "please DM us") or consistent with the assigned category, keep the assigned category.
+Do TWO things:
 
-Respond ONLY with raw JSON: {"category": "<one of the valid categories>"}`;
+1. CATEGORY: If the admin's reply clearly shows the assigned category is wrong, output the correct one. If the admin's reply is generic (a greeting, "we are looking into it", "please DM us") or consistent with the assigned category, keep the assigned category.
+
+2. RESOLVED: Decide whether the admin's reply is a COMPLETE, DIRECT answer that fully resolves the user's question or issue with no follow-up needed. Set resolved=true ONLY for a clear, definitive answer — e.g. "Yes, you can...", "Yes, that's correct", "No, that's not possible", "No problem", "It's done now", or complete instructions that fully answer the question. Set resolved=false for anything that does NOT close the ticket: "we are looking into it", "please DM us", an apology with no answer, or a request for more information ("when did you deposit?", "send me the transaction hash").
+
+Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resolved": true|false}`;
   function originalMessageText(rawText) {
     // tickets.raw_text accumulates [ADMIN_REPLY]/[USER_REPLY] blocks; the
     // original user message is everything before the first block.
@@ -1164,7 +1174,7 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>"}`;
     for (let attempt = 0; attempt < 2; attempt++) {
       const { data } = await supabase
         .from("tickets")
-        .select("id, category, raw_text, is_admin_message, summary")
+        .select("id, category, status, raw_text, is_admin_message, summary")
         .eq("id", ticketId)
         .maybeSingle();
       ticket = data;
@@ -1206,54 +1216,83 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>"}`;
       ),
     );
     const jsonStr = response.choices[0]?.message?.content?.trim() || "{}";
-    let verdict = "";
-    try {
-      verdict = String(JSON.parse(jsonStr).category || "");
-    } catch {
-      return;
-    }
+    const verdict = parseReclassifyVerdict(jsonStr);
+    if (!verdict) return;
+    // --- Category audit (unchanged policy) -------------------------------
     // Exact-match only (case-insensitive). No normalizeCategory fallback here:
     // it defaults unknown strings to General Question, and we will not rewrite
-    // a real ticket's category based on a hallucinated value.
+    // a real ticket's category based on a hallucinated value. NOTE: a category
+    // problem must not block the auto-resolve step below, so the category
+    // branch logs its errors instead of returning early.
     const newCategory = VALID_CATEGORIES.find(
-      (c) => c.toLowerCase() === verdict.toLowerCase().trim(),
+      (c) => c.toLowerCase() === verdict.category.toLowerCase().trim(),
     );
-    if (!newCategory || newCategory === ticket.category) return;
-    // Category and updated_at only — never status, so this can never
-    // un-escalate, re-open, or resolve a ticket.
-    const { error: updateError } = await supabase
-      .from("tickets")
-      .update({
-        category: newCategory,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", ticket.id);
-    if (updateError) {
-      logger.error("Reclassify", "Failed to update ticket category", {
-        ticketId: ticket.id,
-        error: updateError.message,
-      });
-      return;
+    if (newCategory && newCategory !== ticket.category) {
+      const { error: updateError } = await supabase
+        .from("tickets")
+        .update({
+          category: newCategory,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", ticket.id);
+      if (updateError) {
+        logger.error("Reclassify", "Failed to update ticket category", {
+          ticketId: ticket.id,
+          error: updateError.message,
+        });
+      } else {
+        const { error: insertError } = await supabase
+          .from("corrections")
+          .insert({
+            ticket_id: ticket.id,
+            message_text: originalMsg,
+            original_category: ticket.category,
+            correct_category: newCategory,
+            corrected_by: correctedBy || "telegram_admin",
+            correction_source: "admin_reply",
+          });
+        if (insertError) {
+          logger.error("Reclassify", "Failed to record correction", {
+            ticketId: ticket.id,
+            error: insertError.message,
+          });
+        } else {
+          logger.info(
+            "Reclassify",
+            `Admin reply corrected ticket ${ticket.id}: "${ticket.category}" -> "${newCategory}"`,
+          );
+        }
+      }
     }
-    const { error: insertError } = await supabase.from("corrections").insert({
-      ticket_id: ticket.id,
-      message_text: originalMsg,
-      original_category: ticket.category,
-      correct_category: newCategory,
-      corrected_by: correctedBy || "telegram_admin",
-      correction_source: "admin_reply",
-    });
-    if (insertError) {
-      logger.error("Reclassify", "Failed to record correction", {
-        ticketId: ticket.id,
-        error: insertError.message,
-      });
-      return;
+    // --- Bug 4: auto-resolve on a complete, direct admin answer ----------
+    // An affirmative/definitive admin reply ("Yes, you can...", "It's done")
+    // closes the ticket. Guarded to active queue states (Open / In Review)
+    // only: it must NEVER un-park an Escalated / Awaiting User ticket a human
+    // set, nor re-touch Resolved / Dismissed. The UPDATE re-checks the status
+    // (.in AUTO_RESOLVABLE_STATUSES) so a concurrent dashboard change between
+    // the read above and this write is never clobbered — same pattern as the
+    // Milestone 4 classification-race fix. resolved_at is the source of truth
+    // for closure, so it is stamped here.
+    if (shouldResolveFromAdminReply(verdict.resolved, ticket.status)) {
+      const nowISO = new Date().toISOString();
+      const { data: resolvedRows, error: resolveErr } = await supabase
+        .from("tickets")
+        .update({ status: "Resolved", resolved_at: nowISO, updated_at: nowISO })
+        .eq("id", ticket.id)
+        .in("status", AUTO_RESOLVABLE_STATUSES)
+        .select("id");
+      if (resolveErr) {
+        logger.error("Reclassify", "Failed to auto-resolve ticket", {
+          ticketId: ticket.id,
+          error: resolveErr.message,
+        });
+      } else if (resolvedRows && resolvedRows.length > 0) {
+        logger.info(
+          "Reclassify",
+          `Admin reply auto-resolved ticket ${ticket.id} (direct affirmative answer)`,
+        );
+      }
     }
-    logger.info(
-      "Reclassify",
-      `Admin reply corrected ticket ${ticket.id}: "${ticket.category}" -> "${newCategory}"`,
-    );
   }
   // Milestone 3: few-shot learning from the corrections table. Before each
   // classification we look up the 5 past human corrections most similar to
