@@ -19,6 +19,7 @@ import {
   decideClassificationOutcome,
   isCategoryFallback,
 } from "./classification-policy";
+import { disposeUnattachedMessage } from "./admin-message-policy";
 import {
   recoverQuotedParent,
   type FetchedParentMessage,
@@ -1935,6 +1936,22 @@ ${lines.join("\n---\n")}`;
           { error: err.message },
         );
       }
+    }
+    // Bug 3 (2026-06-14): an admin message that reached this point did NOT
+    // attach to any user ticket (no quoted parent recovered above, no ticket
+    // inside the 90-second window). It must be dropped, never turned into a
+    // standalone Resolved ticket (the insert below sets `status: isAdminSender
+    // ? "Resolved" : "Open"`). The messages row was already persisted at the
+    // top of this function, so dedup/idempotency holds across every ingestion
+    // path (live, AutoFetch, getChannelDifference, backfill, /api/ingest) — a
+    // re-scan skips this id. Mirrors the "quoted user reply matched no active
+    // ticket → persisted, no ticket created" drop above.
+    if (disposeUnattachedMessage(isAdminSender) === "drop-admin") {
+      logger.info(
+        "Ingestion",
+        `Admin message ${telegramId} attached to no ticket - dropped (no standalone ticket created)`,
+      );
+      return null;
     }
     const isPreFiltered =
       !skipPreFilter && !shouldProcessMessage(text, learnedKeywordCache);
