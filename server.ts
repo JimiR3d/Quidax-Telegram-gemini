@@ -1369,6 +1369,11 @@ ${lines.join("\n---\n")}`;
     }
   }
   let tlClient = null;
+  // True only after client.connect() resolves without throwing (set false on any
+  // connect failure / failed watchdog reconnect). The honest signal /api/health
+  // reports — `!!tlClient` is a false positive because tlClient is assigned
+  // BEFORE the connect that can throw AUTH_KEY_DUPLICATED.
+  let telegramReady = false;
   const targetGroup =
     process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
   let lastMessageReceivedAt = Date.now();
@@ -2229,12 +2234,14 @@ ${lines.join("\n---\n")}`;
           connectionRetries: 5,
         });
         tlClient = client;
-        try {
-          await client.connect();
-          logger.info(
-            "Telegram",
-            "✅ Connected to Telegram using session string",
-          );
+        let listenersArmed = false;
+        // Every listener/interval below is armed exactly once, on the first
+        // successful connect. Reconnects are handled by the watchdog inside, so
+        // the connect supervisor (further down) can retry connect() without
+        // double-arming. Body moved verbatim from the old post-connect block.
+        const armListenersOnce = async () => {
+          if (listenersArmed) return;
+          listenersArmed = true;
           refreshLearnedKeywords(getSupabase()).catch(() => {});
           setInterval(
             () => refreshLearnedKeywords(getSupabase()),
@@ -2787,6 +2794,7 @@ ${lines.join("\n---\n")}`;
                     try { await client.disconnect(); } catch (e) {}
                   }
                   await client.connect();
+                  telegramReady = true;
                   logger.info("Watchdog", "Reconnected to Telegram");
                   // A fresh connection must be re-primed or the live listener
                   // stays silent after every reconnect (push-only updates).
@@ -2806,6 +2814,7 @@ ${lines.join("\n---\n")}`;
                   // connectionRetries handles real socket drops in between.
                   lastMessageReceivedAt = Date.now();
                 } catch (e) {
+                  telegramReady = false;
                   logger.error("Watchdog", "Failed to reconnect", {
                     error: e.message,
                   });
@@ -2817,6 +2826,73 @@ ${lines.join("\n---\n")}`;
             },
             5 * 60 * 1e3,
           );
+        };
+        // Connect with retry, then arm listeners on success. A transient
+        // AUTH_KEY_DUPLICATED (e.g. a redeploy overlap still holding the session)
+        // used to be FATAL: the watchdog + all ingestion loops are armed only
+        // AFTER a successful connect, so one failed connect left the process up
+        // but ingesting nothing forever — no retry, no exit, and with a 200
+        // healthcheck + ON_FAILURE policy Railway never restarted it.
+        const tryConnect = async (reason) => {
+          await client.connect();
+          telegramReady = true;
+          logger.info("Telegram", `✅ Connected to Telegram (${reason})`);
+          await armListenersOnce();
+        };
+        try {
+          let connected = false;
+          for (let attempt = 1; attempt <= 5; attempt++) {
+            try {
+              // Reconnect from a clean socket on a retry; also avoids hammering
+              // Telegram into a real ban on a genuine duplicate.
+              if (attempt > 1) {
+                try {
+                  await client.disconnect();
+                } catch (e) {}
+              }
+              await tryConnect(`startup attempt ${attempt}`);
+              connected = true;
+              break;
+            } catch (err) {
+              telegramReady = false;
+              logger.error(
+                "Telegram",
+                `Initial Telegram connect attempt ${attempt}/5 failed`,
+                { error: err.message },
+              );
+              if (attempt < 5) {
+                await new Promise((r) => setTimeout(r, attempt * 5e3));
+              }
+            }
+          }
+          if (!connected) {
+            // Not fatal anymore: keep retrying slowly so a longer-lived transient
+            // duplicate (or a later session recovery) is picked up automatically
+            // instead of staying dead until a manual redeploy.
+            logger.error(
+              "Telegram",
+              "Initial Telegram connect failed after 5 attempts - arming slow recovery (every 10 min)",
+            );
+            const recovery = setInterval(async () => {
+              if (telegramReady) {
+                clearInterval(recovery);
+                return;
+              }
+              try {
+                try {
+                  await client.disconnect();
+                } catch (e) {}
+                await tryConnect("slow recovery");
+                clearInterval(recovery);
+              } catch (err) {
+                logger.error(
+                  "Telegram",
+                  "Telegram slow-recovery reconnect failed - will retry in 10 min",
+                  { error: err.message },
+                );
+              }
+            }, 10 * 60 * 1e3);
+          }
         } catch (err) {
           logger.error("Telegram", "❌ Failed to connect Telegram Client", {
             error: err.message,
@@ -2856,7 +2932,16 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         geminiBreaker.getStatus(),
         supabaseBreaker.getStatus(),
       ],
-      telegramConnected: !!tlClient,
+      // Honest signal: the client OBJECT existing (`!!tlClient`) is not the same
+      // as an authenticated, live connection — tlClient is assigned before the
+      // connect that can throw AUTH_KEY_DUPLICATED. telegramReady is set only on
+      // a successful connect; client.connected reflects the live socket.
+      telegramReady,
+      telegramConnected: !!(
+        telegramReady &&
+        tlClient &&
+        (tlClient as any).connected
+      ),
       lastMessageReceivedAt: new Date(lastMessageReceivedAt).toISOString(),
     });
   });
