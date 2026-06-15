@@ -937,7 +937,7 @@ export default function App() {
       <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
 
       {/* Top Nav */}
-      <header className="relative z-10 flex items-center justify-between px-6 py-4 mb-2">
+      <header className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 sm:px-6 py-4 mb-2">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
             <Activity className="w-6 h-6 text-white" />
@@ -948,7 +948,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center flex-wrap gap-2 sm:gap-4">
           <div className="flex items-center gap-2 bg-white/5 border border-white/10 px-4 py-2 rounded-full backdrop-blur-md">
             <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
             <select
@@ -991,13 +991,13 @@ export default function App() {
         <div className="p-12 flex justify-center relative z-10"><div className="animate-spin text-indigo-500"><RefreshCcw /></div></div>
       ) : (
         <React.Fragment>
-        <main className="max-w-7xl mx-auto px-6 space-y-6 w-full relative z-10">
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 space-y-6 w-full relative z-10">
 
           {/* Simulator / Actions */}
           <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-5 mb-6">
-            <div className="flex justify-between items-center mb-2">
+            <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-2">
               <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Test Integration (Simulation)</h2>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center flex-wrap gap-2">
                 <select value={backfillDays} onChange={e => setBackfillDays(Number(e.target.value))}
                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
                   disabled={isBackfilling}
@@ -1103,7 +1103,7 @@ export default function App() {
           {/* Filters Row */}
           <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-4 flex flex-wrap gap-4 items-center mb-6">
             <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest mr-2">Filters</h2>
-            <div className="flex-1 min-w-[200px]">
+            <div className="w-full sm:flex-1 sm:min-w-[200px]">
               <input type="text" placeholder="Search tickets..."
                 className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white outline-none focus:border-indigo-500/50 transition-colors placeholder:text-white/30"
                 value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
@@ -1161,8 +1161,8 @@ export default function App() {
           </div>
 
           {/* Stats Row */}
-          <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-6">
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+          <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 sm:gap-6">
+            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTitle("Active Issues")}>
                   {getKpiTitle("Active Issues")}
@@ -1173,7 +1173,7 @@ export default function App() {
                 <span className={`text-4xl font-bold ${activeCount > 0 ? "text-rose-500" : "text-rose-500/80"}`}>{activeCount}</span>
               </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold truncate" title={getKpiTitle("In Review")}>
                   {getKpiTitle("In Review")}
@@ -1186,7 +1186,7 @@ export default function App() {
                 {escalatedCount} escalated · {awaitingUserCount} awaiting user
               </p>
             </div>
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold truncate" title={getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}>
                   {getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}
@@ -1198,7 +1198,7 @@ export default function App() {
                 </span>
               </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Resolution Rate</p>
               <div className="flex items-end justify-between w-full">
                 <span className="text-4xl font-bold">{resolutionRate}%</span>
@@ -1207,7 +1207,7 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTitle("Avg Response Time")}>
                 {getKpiTitle("Avg Response Time")}
               </p>
@@ -1305,7 +1305,7 @@ export default function App() {
 
           {/* Ticket Feed */}
           <div id="ticket-feed" className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl flex flex-col min-h-0 overflow-hidden">
-            <div className="px-5 py-4 border-b border-white/5 flex justify-between items-center bg-transparent">
+            <div className="px-5 py-4 border-b border-white/5 flex flex-wrap gap-2 justify-between items-center bg-transparent">
               <h3 className="text-sm font-semibold text-white/80">Real-time Stream</h3>
               <div className="flex items-center gap-2">
                 {/* Issues-Only toggle */}
@@ -1600,7 +1600,7 @@ export default function App() {
 
                 {/* Pagination */}
                 {totalPages > 1 && (
-                  <div className="px-5 py-4 flex items-center justify-between border-t border-white/5 pb-6">
+                  <div className="px-5 py-4 flex flex-wrap gap-3 items-center justify-between border-t border-white/5 pb-6">
                     <div className="text-[10px] uppercase font-bold text-white/40 tracking-widest">
                       Showing {(currentPage - 1) * itemsPerPage + 1}-{Math.min(currentPage * itemsPerPage, totalTickets)} of {totalTickets} messages
                     </div>
