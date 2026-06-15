@@ -730,7 +730,10 @@ async function startServer() {
   app.use(express.json({ limit: "1mb" }));
   const limiter = rateLimit({
     windowMs: 15 * 60 * 1e3,
-    max: 200,
+    // The dashboard polls /api/tickets every 10s (~90 requests/15min per open
+    // tab); 1200 comfortably fits a small support team while still capping
+    // floods (~1.3 req/s). Heavy/auth endpoints keep their own tighter limits.
+    max: 1200,
     message: {
       error: "Too many requests from this IP, please try again later.",
     },
@@ -739,7 +742,9 @@ async function startServer() {
   app.use("/api/", limiter);
   const heavyLimiter = rateLimit({
     windowMs: 15 * 60 * 1e3,
-    max: 5,
+    // eval/verify/backfill are expensive but legitimately run several times in a
+    // sitting; 20/15min keeps them usable without being trivially abusable.
+    max: 20,
     message: {
       error: "Too many requests to this endpoint. Please try again later.",
     },

@@ -581,7 +581,7 @@ export default function App() {
     // Use a fixed interval without recreating it on every render unless auth changes
     const interval = setInterval(() => {
       fetchTickets();
-    }, 5000);
+    }, 10000);
     return () => clearInterval(interval);
   }, [isAuthenticated, fetchTickets]);
 
