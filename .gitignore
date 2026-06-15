@@ -21,6 +21,9 @@ history_summary.json
 # Test and diagnostic scripts
 *.mjs
 *.cjs
+# ...except the Telegram session generator, which is a real auth utility (it is
+# .cjs because the project is "type":"module" and the script is CommonJS).
+!scripts/generate-session.cjs
 test*.js
 fix*.js
 check*.py
