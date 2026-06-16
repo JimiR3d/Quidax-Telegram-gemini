@@ -50,6 +50,7 @@ import {
   isWithinGroupingWindow,
   groupingCutoffISO,
 } from "./conversation-grouping";
+import { resolveConnectDelayMs } from "./deploy-overlap";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -2419,6 +2420,34 @@ ${lines.join("\n---\n")}`;
           connectionRetries: 5,
         });
         tlClient = client;
+        // ── Graceful shutdown (rolling-deploy session-overlap guard, part A) ──
+        // When Railway tears this container down during a deploy it sends
+        // SIGTERM. Without a clean disconnect the GramJS socket lingers on
+        // Telegram's side, so the NEW container starting up overlaps it and BOTH
+        // connections get 406 AUTH_KEY_DUPLICATED — which PERMANENTLY burns the
+        // session string (it killed two sessions on 2026-06-15). Disconnecting
+        // here releases the session promptly and cleanly. Raced against a short
+        // timeout so a hung disconnect can't outlast Railway's SIGKILL grace
+        // period, and guarded so SIGTERM+SIGINT can't double-run it. See
+        // deploy-overlap.ts for the matching startup-delay (part B).
+        let shuttingDown = false;
+        const gracefulShutdown = async (signal: string) => {
+          if (shuttingDown) return;
+          shuttingDown = true;
+          logger.info(
+            "Telegram",
+            `${signal} received - disconnecting GramJS client before exit`,
+          );
+          try {
+            await Promise.race([
+              client.disconnect(),
+              new Promise((r) => setTimeout(r, 3 * 1e3)),
+            ]);
+          } catch (e) {}
+          process.exit(0);
+        };
+        process.once("SIGTERM", () => gracefulShutdown("SIGTERM"));
+        process.once("SIGINT", () => gracefulShutdown("SIGINT"));
         let listenersArmed = false;
         // Every listener/interval below is armed exactly once, on the first
         // successful connect. Reconnects are handled by the watchdog inside, so
@@ -3024,6 +3053,27 @@ ${lines.join("\n---\n")}`;
           logger.info("Telegram", `✅ Connected to Telegram (${reason})`);
           await armListenersOnce();
         };
+        // ── Initial-connect delay (rolling-deploy session-overlap guard, part B) ──
+        // Wait before the FIRST connect so Railway has time to tear down the
+        // previous container (which releases its session via the SIGTERM handler
+        // above). Connecting immediately races the old container's still-open
+        // socket → both get AUTH_KEY_DUPLICATED, permanently burning the session
+        // string. ONLY the initial connect is delayed; the watchdog and
+        // slow-recovery reconnects below are in-process (no old container to
+        // race) and are untouched. Tunable via TELEGRAM_CONNECT_DELAY_MS
+        // (default 60s; "0" disables it, e.g. a cold first deploy with no old
+        // container). The /api/health check still passes immediately (Express is
+        // already up), so Railway's healthcheck/cutover timing is unaffected.
+        const connectDelayMs = resolveConnectDelayMs(
+          process.env.TELEGRAM_CONNECT_DELAY_MS,
+        );
+        if (connectDelayMs > 0) {
+          logger.info(
+            "Telegram",
+            `Delaying initial connect ${Math.round(connectDelayMs / 1e3)}s to avoid rolling-deploy session overlap`,
+          );
+          await new Promise((r) => setTimeout(r, connectDelayMs));
+        }
         try {
           let connected = false;
           for (let attempt = 1; attempt <= 5; attempt++) {
