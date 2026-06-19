@@ -15,7 +15,7 @@ type Ticket = {
   sentiment: string;
   is_complaint: boolean;
   suggested_action: string;
-  status: "Open" | "In Review" | "Escalated" | "Awaiting User" | "Resolved" | "Dismissed" | "Classifying";
+  status: "Open" | "In Review" | "Escalated" | "Awaiting User" | "Resolved" | "Assumed Resolved" | "Dismissed" | "Classifying";
   raw_text: string;
   created_at: string;
   suggested_reply?: string | null;
@@ -858,6 +858,7 @@ export default function App() {
   const medianResponseMs = globalStats?.medianResponseMs ?? null;
   const resolvedTodayCount = globalStats?.resolvedTodayCount || 0;
   const resolvedCount   = globalStats?.resolvedCount || 0;
+  const assumedResolvedCount = globalStats?.assumedResolvedCount || 0;
   const totalIssues     = globalStats ? (globalStats.criticalCount + globalStats.highCount + globalStats.mediumCount + globalStats.lowCount) : 0;
   const urgencyCount    = globalStats ? (
     urgencyFilter === "All" ? (globalStats.criticalCount + globalStats.highCount + globalStats.mediumCount + globalStats.lowCount) :
@@ -1144,6 +1145,7 @@ export default function App() {
                 <option value="Escalated">Escalated</option>
                 <option value="Awaiting User">Awaiting User</option>
                 <option value="Resolved">Resolved</option>
+                <option value="Assumed Resolved">Assumed Resolved</option>
                 <option value="Dismissed">Dismissed</option>
               </select>
             </div>
@@ -1207,6 +1209,11 @@ export default function App() {
                   {filterDays === "1" ? resolvedTodayCount : resolvedCount}
                 </span>
               </div>
+              {filterDays !== "1" && assumedResolvedCount > 0 && (
+                <p className="text-[11px] text-teal-400/80 mt-2 truncate">
+                  + {assumedResolvedCount} assumed
+                </p>
+              )}
             </div>
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Resolution Rate</p>
@@ -1375,6 +1382,7 @@ export default function App() {
                                     ticket.status === "Escalated"     ? "bg-rose-500/10 text-rose-400 border-rose-500/20" :
                                     ticket.status === "Awaiting User" ? "bg-sky-500/10 text-sky-400 border-sky-500/20" :
                                     ticket.status === "Resolved"      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                                    ticket.status === "Assumed Resolved" ? "bg-teal-500/10 text-teal-400 border-teal-500/20" :
                                     ticket.status === "Dismissed"     ? "bg-white/5 text-white/40 border-white/10" :
                                     "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                   }`}
@@ -1387,6 +1395,7 @@ export default function App() {
                                   <option value="Escalated">Escalated</option>
                                   <option value="Awaiting User">Awaiting User</option>
                                   <option value="Resolved">Resolved</option>
+                                  <option value="Assumed Resolved">Assumed Resolved</option>
                                   <option value="Dismissed">Dismissed</option>
                                 </select>
                               )}
