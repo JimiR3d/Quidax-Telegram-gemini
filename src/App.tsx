@@ -180,9 +180,9 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
   };
 
   return (
-    <div className="min-h-screen bg-[#05070a] text-white font-sans flex flex-col relative overflow-hidden">
-      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none" />
-      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
+    <div className="min-h-screen bg-[#05070a] text-white font-sans flex flex-col relative overflow-hidden transform-gpu">
+      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] pointer-events-none transform-gpu" />
+      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] pointer-events-none transform-gpu" />
 
       <header className="relative z-10 flex items-center justify-between px-6 py-4">
         <div className="flex items-center gap-3">
@@ -804,10 +804,10 @@ export default function App() {
   // -------------------------------------------------------------------------
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
-        <form onSubmit={handleLogin} className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-sm w-full relative z-10 flex flex-col items-center">
+      <div className="min-h-screen bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden transform-gpu">
+        <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] pointer-events-none transform-gpu" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] pointer-events-none transform-gpu" />
+        <form onSubmit={handleLogin} className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-sm w-full relative z-10 flex flex-col items-center transform-gpu">
           <div className="mb-6 flex justify-center w-full">
             <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
               <Lock className="w-8 h-8 text-white" />
@@ -921,7 +921,7 @@ export default function App() {
   // RENDER: Dashboard
   // -------------------------------------------------------------------------
   return (
-    <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12">
+    <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12 transform-gpu">
       {/* Toast Notification */}
       <div className={`fixed top-4 right-4 z-50 transform transition-all duration-300 ${notification.visible ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"}`}>
         <div className={`flex items-center space-x-3 px-4 py-3 rounded-lg shadow-2xl backdrop-blur-md border ${notification.type === "success" ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"}`}>
@@ -943,8 +943,8 @@ export default function App() {
         </div>
       )}
 
-      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none" />
-      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[150px] pointer-events-none" />
+      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] pointer-events-none transform-gpu" />
+      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] pointer-events-none transform-gpu" />
 
       {/* Top Nav */}
       <header className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 sm:px-6 py-4 mb-2">
