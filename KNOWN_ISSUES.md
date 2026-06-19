@@ -45,10 +45,15 @@ All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 - ✅ 1b. `activeCount` in `tickets_stats` excludes General Question / Praise / Spam/Irrelevant. The `resolutionRate` JS at `server.ts:3407` needed NO change — it reads `activeCount` from the RPC, so the SQL fix flows through. Live: Active 240→161, rate 16%→22%.
 - ✅ 1c. Dead `'Classifying'` branch removed from `activeCount`. The 9 Spam/Praise tickets that were sitting In Review were Dismissed (previewed first, reversible in /train) → In Review 139→130. All reconciled against live SQL on `dovgochitqpuvmneqeqz`. Verified: `tsc` clean, 172/172 tests, `npm run build` clean. (Not yet committed at time of writing.)
 
-**Phase 2 — `Assumed Resolved` + 7-day auto-resolve sweep ⚠️ NEEDS EXPLICIT SCHEMA-CHANGE CONFIRM:**
-- 2a. Migration widening `tickets_status_check` to add `Assumed Resolved` (additive/reversible; `ls supabase/migrations/` FIRST — 015 already used, so this is 016).
-- 2b. Pure module + periodic sweep: admin-engaged + quiet ≥7d → `Assumed Resolved` (+`resolved_at`); rate counts it as resolved; reopens to In Review on a new user message; frontend renders the new state. (Mirror the guarded-conditional-update pattern so a concurrent human change is never clobbered.)
-- 2c. One-time previewed backfill of the existing ~101-ticket backlog.
+**✅ Phase 2 — `Assumed Resolved` + 7-day auto-resolve sweep — CODE SHIPPED (2026-06-19, migration `017_assumed_resolved`); sweep is DORMANT pending enable.**
+- ✅ 2a. Migration `017_assumed_resolved` applied live: `tickets_status_check` widened to add `Assumed Resolved` (additive/reversible); `tickets_stats` gained `assumedResolvedCount`. (Numbering note: 016 was Phase 1, so this is 017.)
+- ✅ 2b. Pure module `assumed-resolved.ts` (`shouldAssumeResolved`, `ASSUME_RESOLVABLE_STATUSES = [Open, In Review, Awaiting User]`, `ASSUMED_RESOLVED_QUIET_DAYS = 7`) + 11 unit tests. Eligibility includes Awaiting User (user choice) but NEVER Escalated.
+- ✅ 2c. Sweep `assumeResolveQuietTickets()` in server.ts (mirrors `repairMissingSuggestedReplies`: startup +3min, then hourly). Admin-engaged = `raw_text` has `[ADMIN_REPLY]` OR `first_admin_reply_at` set; quiet = `coalesce(last_message_at, created_at)` ≥7d old; guarded conditional update (`.in("status", ASSUME_RESOLVABLE_STATUSES)`) so a concurrent change is never clobbered; does NOT post to Telegram. **Gated behind `ASSUMED_RESOLVE_ENABLED` (default OFF) so it ships dormant** — enable on Railway to run the backfill.
+- ✅ 2d. Reopen: `Assumed Resolved` added to the user-reply lookup `.in()` arrays (isResolution + quoted USER_REPLY); a user reply flips Awaiting User OR Assumed Resolved → In Review and clears `resolved_at`. Admin paths unchanged.
+- ✅ 2e. Resolution-rate JS counts `(Resolved + Assumed Resolved)` in numerator + denominator; `VALID_STATUSES` and the `resolved_at` stamp condition accept the new status.
+- ✅ 2f. Frontend: status union, teal badge, per-ticket + filter dropdowns, and a "+ N assumed" sub-line on the Resolved card.
+- **Verified:** 11 new unit tests (183 total green), tsc clean, build clean; migration SQL-verified; reopen proven end-to-end on the no-telegram launcher (Open → Assumed Resolved → user reply → In Review + `resolved_at` cleared; test data cleaned up).
+- **⏭️ PENDING:** the 32-ticket backlog preview was generated and signed off; enable `ASSUMED_RESOLVE_ENABLED=true` on Railway after deploy to run it (projected rate 22% → ~38%). The sweep's live first run is its first real exercise (tlClient-null locally) — confirm the 32 flipped + rate moved post-deploy.
 
 **Phase 3 — Conversation threading by active ticket (biggest change):**
 - 3a. Rework the grouping branch: a new un-quoted non-admin message joins the sender's existing ACTIVE ticket across admin-interleaving (wider window than 5min).
