@@ -1,5 +1,7 @@
 # PulseDesk: AI Handoff Document
 
+> **⚡ 2026-06-19 — KPI & WORKFLOW AUDIT COMPLETE (read-only), implementation QUEUED.** The resolution-rate math is faithful but reads ~16% because the 240-ticket Active denominator is a graveyard: conversation fragmentation (one user's 4-hour chat → 14 In-Review tickets), invisible DM/email + go-quiet resolutions (101/240 active are admin-engaged + quiet ≥3d), and 33% noise (banter classified General Question). Avg Response shows mean 8.4h vs median 6.5min reality (one 18-day outlier). **User signed off on 4 decisions:** thread-by-active-ticket + topic-shift detection; 7-day **`Assumed Resolved`** new status (⚠️ schema change — re-confirm); exclude-never-delete noise from the rate; median response time. **Full findings + locked decisions + the 4-phase plan are at the TOP of `KNOWN_ISSUES.md`. NOTHING coded yet — start at Phase 1** (median + exclude noise from denominator + dead-branch cleanup; no schema, no ingestion change).
+
 ## 1. What PulseDesk Is & Why It Exists
 **PulseDesk** is a production-grade Telegram support triage tool built specifically for **Quidax** (a Nigerian crypto exchange). Its primary purpose is to allow their support team to immediately start using an AI-augmented triage system to manage community inquiries, drastically reducing response times and ensuring critical issues are highlighted. 
 *Strategic Purpose:* This project also serves as a high-value pitch asset to demonstrate concrete, deployable value to the Quidax team.

@@ -2,6 +2,65 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## ✅ KPI & WORKFLOW AUDIT — COMPLETE (read-only, 2026-06-19); IMPLEMENTATION QUEUED, decisions LOCKED
+
+**Status: investigation DONE, NO code changed yet. The 4 product decisions are signed off by the user. Start the next session at Phase 1 of the plan below.**
+
+All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
+`Dismissed 500 · In Review 139 · Open 100 · Resolved 46 · Awaiting User 1` → Active 240 → **Resolution Rate = 46/(46+240) = 16%** (30-day dashboard view = 33/219 = 15%). The dashboard math is FAITHFUL (`server.ts:3407`) — the low number is real given current bucketing, NOT an arithmetic bug.
+
+### Findings
+
+**Part A — KPI math (mostly correct; 2 real issues + minor):**
+- 🔴 **A1 Avg Response Time is the MEAN, outlier-poisoned.** 54 responded tickets: median **390s (6.5min)**, p90 67min, 22/54 (41%) under 5min — but the card shows the **mean 30,333s (8.4h)**, dragged by ONE 18.1-day outlier (max 1,567,426s, a 90s-window/quoted heuristic mis-attach). `src/App.tsx:1225` renders `avgResponseMs` raw; `tickets_stats` computes `avg()`. → switch to median.
+- 🟠 **A2 Dismissable categories sit Active.** 9 active tickets are Spam/Irrelevant (6) or Praise (3) (both in `AUTO_DISMISS_CATEGORIES`) — reclassified to noise AFTER insert, so the insert-time auto-dismiss never caught them; they count in the Active denominator.
+- 🟡 **A3 minor:** `tickets_stats.activeCount` counts a `'Classifying'` status the CHECK constraint forbids (dead branch). 38/46 Resolved have `resolved_at = NULL` (legacy) → invisible to "Resolved Today" forever. Filters DO reach BOTH the table query and the RPC (status deliberately table-only) — verified, no bug.
+
+**Part B — "In Review" is a graveyard:**
+- 96/139 In-Review quiet >7 days; 133 quiet >3d; only 3 active in last 24h. Oldest created 2026-05-09 (6 weeks).
+- "In Review" is semantically overloaded: only 48/139 have a `first_admin_reply_at` — it does NOT mean "an admin is handling it".
+- Resolutions are invisible: ≥13 active tickets show an email/DM hand-off (e.g. `e374c960`: admin says "Send us an email support@quidax.com, include your UID"); users go silent after the admin engages (`f82fdc3e`). **101 of 240 active tickets are admin-engaged AND quiet ≥3 days.** No time-based decay exists.
+
+**Part C — Noise & grouping:**
+- 🔴 **C1 Conversation fragmentation = the single biggest driver.** One user (`b2869ef1`) had ONE ~4-hour XRP-deposit/KYC conversation on Jun 15 that became **14 separate In-Review tickets** (one per user↔admin message, incl. context-free fragments like "2388200980", "This is the response") — 10% of ALL In-Review. Grouping's 5-min consecutive-same-sender window is too narrow for real dialogues (admin-interleaved, multi-minute gaps while the user waits). ~25 same-sender-<5min pairs since the grouping deploy did NOT fold.
+- 🟠 **C2 Noise gate too permissive.** All 12 most-recent Open "General Question" tickets are banter/news/price-commands ("/p BTC", "/p ZEC", Strait-of-Hormuz news paste) — none are support. 79/240 active (33%) are General Question/Spam/Praise; 25 are `[NEEDS REVIEW]` classifier failures defaulting to Medium/Open. Grouping IS firing (`[USER_FOLLOWUP]` blocks exist) — the gap is window width + admin-interleaving, not a dead feature.
+
+### Impact (each lever, grounded in live SQL)
+| Lever | Resolution rate |
+|---|---|
+| Current (as shown) | 16% |
+| Exclude noise (GenQ/Spam/Praise) from denominator | 22% |
+| Auto-resolve admin-engaged + quiet ≥3d | 51% |
+| Both | 44% |
+
+### LOCKED DECISIONS (user sign-off 2026-06-19)
+1. **Threading:** thread by ACTIVE TICKET — fold a user's messages into their open ticket across admin replies/gaps; BUT a genuinely NEW/different issue from the same user still spawns its own ticket (→ needs topic-shift detection).
+2. **Auto-resolve:** **7 days** quiet → a NEW distinct status **`Assumed Resolved`** (counts as resolved in the rate, auditable, separate from human "Resolved"). ⚠️ SCHEMA CHANGE — re-confirm with the user before applying the migration.
+3. **Noise = EXCLUDE, NEVER DELETE** (user was explicit about not losing a misclassified real issue): never drop/delete any message; exclude General Question/Spam/Irrelevant/Praise from the resolution-rate DENOMINATOR (safe — doesn't hide them); keep suspected banter visible + reversible, just out of the main triage lane (GenQ already drops from "Issues Only"; Spam/Praise → Dismissed but filterable/reversible in /train); uncertainty already errs to visibility (a FAILED classification stays Open + `[NEEDS REVIEW]`, never dismissed); pre-filter banter heuristics (bare "/p TICKER", pasted news) route to the noise lane, NOT a hard drop.
+4. **Response stat:** median (not mean).
+
+### IMPLEMENTATION PLAN (phased; complete + confirm each before the next; NOTHING coded yet)
+**Phase 1 — Honest KPIs (no schema, no ingestion-behavior change):**
+- 1a. `tickets_stats`: Avg Response → median; relabel the card "Median Response Time".
+- 1b. Exclude General Question/Spam/Irrelevant/Praise from the Active denominator (SQL fn + `resolutionRate` JS). Moves the headline 16%→~22% honestly, no data touched.
+- 1c. Remove the dead `'Classifying'` branch; one-time previewed Dismiss of the 9 Spam/Praise sitting Active.
+
+**Phase 2 — `Assumed Resolved` + 7-day auto-resolve sweep ⚠️ NEEDS EXPLICIT SCHEMA-CHANGE CONFIRM:**
+- 2a. Migration widening `tickets_status_check` to add `Assumed Resolved` (additive/reversible; `ls supabase/migrations/` FIRST — 015 already used, so this is 016).
+- 2b. Pure module + periodic sweep: admin-engaged + quiet ≥7d → `Assumed Resolved` (+`resolved_at`); rate counts it as resolved; reopens to In Review on a new user message; frontend renders the new state. (Mirror the guarded-conditional-update pattern so a concurrent human change is never clobbered.)
+- 2c. One-time previewed backfill of the existing ~101-ticket backlog.
+
+**Phase 3 — Conversation threading by active ticket (biggest change):**
+- 3a. Rework the grouping branch: a new un-quoted non-admin message joins the sender's existing ACTIVE ticket across admin-interleaving (wider window than 5min).
+- 3b. Topic-shift detection so a genuinely different new issue still opens its own ticket.
+- Pure module + tests; live leg verified via `/api/ingest` e2e (tlClient null locally).
+
+**Phase 4 — Noise pre-filter hardening:** price-command/news heuristics → noise lane, never deleted.
+
+**Likely change sites:** `server.ts` (status transitions, auto-resolve sweep, grouping branch, noise pre-filter), the `tickets_stats` SQL function (via migration), `classification-policy.ts`, a new `assumed-resolved.ts` pure module + tests, `conversation-grouping.ts`, `src/App.tsx` (median label, new status rendering, rate display). Model: Phase 1 mechanical (Sonnet-grade); Phase 3 topic-shift genuinely needs Opus. Per-file verify after each: `npx tsc --noEmit` + `npm test` + `npm run build` + git-diff review.
+
+### 📎 Original audit scope (now ANSWERED above — kept for reference)
+
 ## ⏭️ NEXT-SESSION PRIORITY — Full system logic & KPI-correctness audit (requested 2026-06-19)
 
 **The trigger:** the user sees **too many tickets stuck "In Review"** and a **resolution rate that reads far too low** — which unfairly paints a very active, responsive admin as poor-performing. A support tool must reflect reality, never produce false-negative readings. Audit the WHOLE system's logic for real-world soundness, and verify every KPI computes what it claims.
