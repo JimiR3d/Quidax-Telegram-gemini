@@ -79,9 +79,9 @@ One principle runs through the entire codebase and this guide: **evidence over a
 - [x] Part 2 — What Is PulseDesk
 - [x] Part 3 — Architecture and Data Flow
 - [x] Part 4 — Directory and Files
-- [ ] Part 5 — Subsystems Deep Dive
-- [ ] Part 6 — Security and Safety
-- [ ] Part 7 — The Bug Stories
+- [x] Part 5 — Subsystems Deep Dive
+- [x] Part 6 — Security and Safety
+- [x] Part 7 — The Bug Stories
 - [ ] Part 8 — Interview Prep
 - [ ] Part 9 — Demo Script
 - [ ] Part 10 — Role Positioning
