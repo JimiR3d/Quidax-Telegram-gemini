@@ -4,7 +4,7 @@ This document provides a brutally honest, exhaustive tracking of every bug, susp
 
 ## ✅ KPI & WORKFLOW AUDIT — COMPLETE (read-only, 2026-06-19); IMPLEMENTATION QUEUED, decisions LOCKED
 
-**Status: investigation DONE, NO code changed yet. The 4 product decisions are signed off by the user. Start the next session at Phase 1 of the plan below.**
+**Status: Phases 1, 2 & 3 SHIPPED (Phase 2 sweep dormant pending a Railway enable). The 4 product decisions are signed off by the user. Start the next session at Phase 4 (noise pre-filter hardening) of the plan below.**
 
 All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 `Dismissed 500 · In Review 139 · Open 100 · Resolved 46 · Awaiting User 1` → Active 240 → **Resolution Rate = 46/(46+240) = 16%** (30-day dashboard view = 33/219 = 15%). The dashboard math is FAITHFUL (`server.ts:3407`) — the low number is real given current bucketing, NOT an arithmetic bug.
@@ -55,10 +55,11 @@ All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 - **Verified:** 11 new unit tests (183 total green), tsc clean, build clean; migration SQL-verified; reopen proven end-to-end on the no-telegram launcher (Open → Assumed Resolved → user reply → In Review + `resolved_at` cleared; test data cleaned up).
 - **⏭️ PENDING:** the 32-ticket backlog preview was generated and signed off; enable `ASSUMED_RESOLVE_ENABLED=true` on Railway after deploy to run it (projected rate 22% → ~38%). The sweep's live first run is its first real exercise (tlClient-null locally) — confirm the 32 flipped + rate moved post-deploy.
 
-**Phase 3 — Conversation threading by active ticket (biggest change):**
-- 3a. Rework the grouping branch: a new un-quoted non-admin message joins the sender's existing ACTIVE ticket across admin-interleaving (wider window than 5min).
-- 3b. Topic-shift detection so a genuinely different new issue still opens its own ticket.
-- Pure module + tests; live leg verified via `/api/ingest` e2e (tlClient null locally).
+**✅ Phase 3 — Conversation threading by active ticket — DONE & VERIFIED (2026-06-19, no migration):**
+- ✅ 3a. The grouping branch (`server.ts`) now folds across a WIDE window. Gap since the candidate's last activity (`last_message_at`, which advances on admin replies) decides the band via the pure `groupingBand` helper (`conversation-grouping.ts`): `fast` (≤5 min `GROUPING_WINDOW_MS` → fold immediately, no LLM), `extended` (5 min–6 h `GROUPING_ACTIVE_WINDOW_MS`, env-overridable → topic-shift decides), `none` (>6 h or out-of-order → new ticket). Candidate = the single most-recent ACTIVE ticket (Open/In Review/Escalated/Awaiting User) for the sender_hash; `Assumed Resolved` is deliberately NOT a fold candidate (the quoted-reply path already reopens it).
+- ✅ 3b. Topic-shift detection: new pure module `topic-shift.ts` (`buildTopicShiftMessages` + `parseTopicShiftDecision`, strict `same_issue===true`, fail-safe false). `checkSameIssueViaGroq` in `server.ts` runs ONE Groq `llama-3.1-8b-instant` call (temp 0, `groqBreaker` + `withTimeout` + PII redaction) only in the `extended` band; any error/timeout/parse-fail → treat as a NEW issue (never wrongly merges; a Groq outage degrades to pre-Phase-3 behaviour). The awaited call adds ~1-2s to that minority of messages.
+- The `telegram_message_id` dedup at the top of `processAndIngestMessage` was NOT touched (idempotency held).
+- **Verified:** `tsc` clean; **204/204** tests (+21 new: 10 `groupingBand`, 11 `topic-shift`); `npm run build` clean. Live e2e on the no-telegram launcher via `/api/ingest` (grouping never calls `tlClient`, and Groq DOES run locally, so the full path incl. the topic-shift LLM was exercised): fast fold (no topic-shift line), extended same-issue → fold (`SAME issue (fold)` log), extended topic-shift → new ticket (`DIFFERENT issue (new ticket)` log), and re-ingest idempotency (`ticket:null`, still exactly one `[USER_FOLLOWUP]`). All 6 test rows cleaned up; DB reconciled to baseline.
 
 **Phase 4 — Noise pre-filter hardening:** price-command/news heuristics → noise lane, never deleted.
 

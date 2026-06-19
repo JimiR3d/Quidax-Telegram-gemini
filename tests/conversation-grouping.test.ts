@@ -3,6 +3,7 @@ import {
   userThreadText,
   isWithinGroupingWindow,
   groupingCutoffISO,
+  groupingBand,
 } from "../conversation-grouping";
 
 // Helpers to build raw_text exactly as server.ts appends blocks.
@@ -160,5 +161,56 @@ describe("groupingCutoffISO — the oldest groupable last_message_at", () => {
   it("returns null for a missing/invalid message date", () => {
     expect(groupingCutoffISO(null, WINDOW_MS)).toBeNull();
     expect(groupingCutoffISO("nonsense", WINDOW_MS)).toBeNull();
+  });
+});
+
+describe("groupingBand — Phase 3 fast / extended / none classification", () => {
+  const FAST_MS = 5 * 60 * 1000; // 5 min
+  const WIDE_MS = 6 * 60 * 60 * 1000; // 6 h
+  const last = "2026-06-15T12:00:00.000Z";
+  const at = (mins: number) =>
+    new Date(Date.parse(last) + mins * 60 * 1000).toISOString();
+
+  it("is 'fast' for a simultaneous message (diff 0)", () => {
+    expect(groupingBand(last, last, FAST_MS, WIDE_MS)).toBe("fast");
+  });
+
+  it("is 'fast' within the 5-min window", () => {
+    expect(groupingBand(last, at(3), FAST_MS, WIDE_MS)).toBe("fast");
+  });
+
+  it("is 'fast' exactly at the 5-min boundary (inclusive)", () => {
+    expect(groupingBand(last, at(5), FAST_MS, WIDE_MS)).toBe("fast");
+  });
+
+  it("is 'extended' just past the fast window", () => {
+    expect(
+      groupingBand(last, new Date(Date.parse(at(5)) + 1).toISOString(), FAST_MS, WIDE_MS),
+    ).toBe("extended");
+  });
+
+  it("is 'extended' at 20 minutes (the Phase-3 topic-shift case)", () => {
+    expect(groupingBand(last, at(20), FAST_MS, WIDE_MS)).toBe("extended");
+  });
+
+  it("is 'extended' exactly at the 6-h boundary (inclusive)", () => {
+    expect(groupingBand(last, at(360), FAST_MS, WIDE_MS)).toBe("extended");
+  });
+
+  it("is 'none' just past the 6-h window", () => {
+    expect(
+      groupingBand(last, new Date(Date.parse(at(360)) + 1).toISOString(), FAST_MS, WIDE_MS),
+    ).toBe("none");
+  });
+
+  it("is 'none' for an out-of-order parent (newer than the message)", () => {
+    expect(groupingBand(last, at(-1), FAST_MS, WIDE_MS)).toBe("none");
+  });
+
+  it("is 'none' for missing / invalid timestamps", () => {
+    expect(groupingBand(null, at(20), FAST_MS, WIDE_MS)).toBe("none");
+    expect(groupingBand(last, null, FAST_MS, WIDE_MS)).toBe("none");
+    expect(groupingBand(last, "not-a-date", FAST_MS, WIDE_MS)).toBe("none");
+    expect(groupingBand("", "", FAST_MS, WIDE_MS)).toBe("none");
   });
 });

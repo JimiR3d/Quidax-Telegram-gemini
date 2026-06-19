@@ -111,3 +111,30 @@ export function groupingCutoffISO(
   if (Number.isNaN(msg)) return null;
   return new Date(msg - windowMs).toISOString();
 }
+
+// Phase 3 — which grouping band an incoming message falls into relative to a
+// candidate parent ticket's last activity. `fastMs` is the cheap immediate-fold
+// window (GROUPING_WINDOW_MS, ~5 min); `wideMs` is the wider active-thread
+// window (GROUPING_ACTIVE_WINDOW_MS, ~6 h). With gap = messageDate - lastMessage:
+//   "fast"     0 <= gap <= fastMs        → fold immediately, no topic-shift LLM
+//   "extended" fastMs < gap <= wideMs    → run topic-shift; fold only if same issue
+//   "none"     gap < 0, gap > wideMs, or any missing/invalid timestamp → no fold
+// Mirrors isWithinGroupingWindow's fail-safe: an out-of-order parent (newer than
+// the message) or an unparseable timestamp is "none", never a fold. Assumes
+// fastMs <= wideMs (the call site's constants guarantee it).
+export type GroupingBand = "fast" | "extended" | "none";
+export function groupingBand(
+  lastMessageAtISO: string | null | undefined,
+  messageDateISO: string | null | undefined,
+  fastMs: number,
+  wideMs: number,
+): GroupingBand {
+  const last = Date.parse(String(lastMessageAtISO ?? ""));
+  const msg = Date.parse(String(messageDateISO ?? ""));
+  if (Number.isNaN(last) || Number.isNaN(msg)) return "none";
+  const diff = msg - last;
+  if (diff < 0) return "none";
+  if (diff <= fastMs) return "fast";
+  if (diff <= wideMs) return "extended";
+  return "none";
+}

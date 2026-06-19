@@ -47,9 +47,13 @@ import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
 import { PIDGIN_GLOSSARY_PROMPT } from "./pidgin-glossary";
 import {
   userThreadText,
-  isWithinGroupingWindow,
   groupingCutoffISO,
+  groupingBand,
 } from "./conversation-grouping";
+import {
+  buildTopicShiftMessages,
+  parseTopicShiftDecision,
+} from "./topic-shift";
 import { resolveConnectDelayMs } from "./deploy-overlap";
 import {
   shouldAssumeResolved,
@@ -69,6 +73,12 @@ dotenv.config();
 // overridable; default 5 minutes.
 const GROUPING_WINDOW_MS =
   Number(process.env.GROUPING_WINDOW_MS) || 5 * 60 * 1000;
+// Phase 3 — the WIDER "active thread" window. A same-sender un-quoted message
+// past the fast window (above) but within this one is a topic-shift CANDIDATE:
+// Groq decides whether it continues the sender's existing active ticket or is a
+// genuinely new issue. Default 6 hours; env-overridable.
+const GROUPING_ACTIVE_WINDOW_MS =
+  Number(process.env.GROUPING_ACTIVE_WINDOW_MS) || 6 * 60 * 60 * 1000;
 var REQUIRED_ENV_VARS = [
   "GROQ_API_KEY",
   "SUPABASE_URL",
@@ -1418,6 +1428,55 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
   // classification fields ONLY — never status (a human/admin owns status;
   // grouping must never reopen/resolve/escalate). Fire-and-forget,
   // breaker-protected; the Pidgin glossary + few-shot + temp 0 are inherited.
+  //
+  // Phase 3 topic-shift gate: does a new un-quoted message CONTINUE the
+  // candidate active ticket, or is it a genuinely different issue? Used only in
+  // the EXTENDED grouping band (past the cheap 5-min fast window). Reuses the
+  // Groq pipeline (same model/breaker/timeout/PII-redaction as classification).
+  // FAIL-SAFE: any error/breaker-open/timeout/parse failure returns false (do
+  // NOT fold → a new ticket is opened), so this never wrongly merges two issues
+  // and a Groq outage degrades to pre-Phase-3 behaviour. The PURE prompt/parse
+  // pieces live in ./topic-shift.
+  async function checkSameIssueViaGroq(candidateTicket, newText) {
+    try {
+      const thread = redactPII(
+        sanitizeForPrompt(userThreadText(candidateTicket?.raw_text)),
+      );
+      const summary = redactPII(
+        sanitizeForPrompt(String(candidateTicket?.summary ?? "")),
+      );
+      const incoming = redactPII(sanitizeForPrompt(String(newText ?? "")));
+      const messages = buildTopicShiftMessages(thread, summary, incoming);
+      const response = await groqBreaker.call(() =>
+        withTimeout(
+          openai.chat.completions.create({
+            model: "llama-3.1-8b-instant",
+            temperature: 0,
+            messages,
+            response_format: { type: "json_object" },
+          }),
+          15e3,
+          "Groq topic-shift",
+        ),
+      );
+      const jsonStr = response.choices[0]?.message?.content?.trim() || "{}";
+      const { sameIssue } = parseTopicShiftDecision(jsonStr);
+      logger.info(
+        "Grouping",
+        `Topic-shift verdict for candidate ticket ${candidateTicket?.id}: ${
+          sameIssue ? "SAME issue (fold)" : "DIFFERENT issue (new ticket)"
+        }`,
+      );
+      return sameIssue;
+    } catch (e) {
+      logger.error(
+        "Grouping",
+        "Topic-shift check failed - treating as a new issue (no fold)",
+        { error: e?.message },
+      );
+      return false;
+    }
+  }
   async function reclassifyGroupedTicket(supabase, ticketId) {
     // Re-fetch and wait once (12s) for the initial async classifier to settle —
     // a follow-up can land inside the ~5-10s classification window, when the
@@ -2226,20 +2285,30 @@ ${lines.join("\n---\n")}`;
       );
       return null;
     }
-    // Conversation grouping (KNOWN_ISSUES §8/§9): a fresh un-quoted user message
-    // from a sender who already has an active ticket in the rolling window is a
-    // FOLLOW-UP to that ticket, not a new issue. By this point the control flow
-    // above guarantees a non-admin sender, no replyToMsgId, and not a "thanks"
-    // auto-resolve — i.e. exactly a fresh un-quoted user message. Append it as a
-    // [USER_FOLLOWUP] block, extend the window, and re-classify on the full
-    // thread; do NOT create a sibling ticket. Idempotent: the telegram_message_id
-    // dedup at the top of this function means a re-scan (any of the four
-    // ingestion paths) never re-appends. Falls through to a new ticket when
-    // nothing matches. senderHash is only shared across a user's messages when a
-    // senderId was supplied; without it the hash is per-message and never groups.
+    // Conversation grouping (KNOWN_ISSUES §C1 / Phase 3): a fresh un-quoted user
+    // message from a sender who already has an active ticket is a FOLLOW-UP to
+    // that ticket, not a new issue. By this point the control flow above
+    // guarantees a non-admin sender, no replyToMsgId, and not a "thanks"
+    // auto-resolve — i.e. exactly a fresh un-quoted user message.
+    //
+    // Two bands keyed on the gap since the candidate's last activity
+    // (last_message_at advances on admin replies too, so the gap = "time since
+    // ANY activity on this ticket"):
+    //   FAST     (<=5 min)     fold immediately — cheap, almost certainly same
+    //   EXTENDED (5min..6h)    ask Groq "same issue?"; fold only if yes, else
+    //                          fall through and open a new ticket (topic shift)
+    // Append as a [USER_FOLLOWUP] block, extend the window, and re-classify on
+    // the full thread; do NOT create a sibling ticket. Idempotent: the
+    // telegram_message_id dedup at the top of this function means a re-scan (any
+    // of the four ingestion paths) never re-appends. Falls through to a new
+    // ticket when nothing matches. senderHash is only shared across a user's
+    // messages when a senderId was supplied; without it the hash is per-message
+    // and never groups.
     if (!isAdminSender && senderHash) {
       try {
-        const cutoff = groupingCutoffISO(msgDateISO, GROUPING_WINDOW_MS);
+        // Widest groupable cutoff (6h). The single most-recent active ticket in
+        // that window is the candidate parent (v1: compare against one ticket).
+        const cutoff = groupingCutoffISO(msgDateISO, GROUPING_ACTIVE_WINDOW_MS);
         if (cutoff) {
           const { data: groupCandidates } = await supabase
             .from("tickets")
@@ -2253,14 +2322,21 @@ ${lines.join("\n---\n")}`;
             .order("last_message_at", { ascending: false })
             .limit(1);
           const parentTicket = groupCandidates && groupCandidates[0];
-          if (
-            parentTicket &&
-            isWithinGroupingWindow(
-              parentTicket.last_message_at,
-              msgDateISO,
-              GROUPING_WINDOW_MS,
-            )
-          ) {
+          const band = parentTicket
+            ? groupingBand(
+                parentTicket.last_message_at,
+                msgDateISO,
+                GROUPING_WINDOW_MS,
+                GROUPING_ACTIVE_WINDOW_MS,
+              )
+            : "none";
+          // "fast" folds outright; "extended" folds only when Groq says the new
+          // message continues the same issue (else topic shift → new ticket).
+          let shouldFold = band === "fast";
+          if (band === "extended") {
+            shouldFold = await checkSameIssueViaGroq(parentTicket, text);
+          }
+          if (parentTicket && shouldFold) {
             const newRawText =
               parentTicket.raw_text +
               `\n\n[USER_FOLLOWUP]\n${text}\n[/USER_FOLLOWUP]`;
@@ -2274,7 +2350,7 @@ ${lines.join("\n---\n")}`;
               .eq("id", parentTicket.id);
             logger.info(
               "Ingestion",
-              `Grouped follow-up ${telegramId} into ticket ${parentTicket.id} (same sender, within window)`,
+              `Grouped follow-up ${telegramId} into ticket ${parentTicket.id} (same sender, ${band} band)`,
             );
             // Re-classify on the full user-side thread (fire-and-forget, never
             // touches status).
