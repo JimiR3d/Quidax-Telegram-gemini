@@ -51,6 +51,11 @@ import {
   groupingCutoffISO,
 } from "./conversation-grouping";
 import { resolveConnectDelayMs } from "./deploy-overlap";
+import {
+  shouldAssumeResolved,
+  ASSUME_RESOLVABLE_STATUSES,
+  ASSUMED_RESOLVED_QUIET_DAYS,
+} from "./assumed-resolved";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -1080,6 +1085,96 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
   }
   setTimeout(repairMissingSuggestedReplies, 2 * 60 * 1e3);
   setInterval(repairMissingSuggestedReplies, 15 * 60 * 1e3);
+  // Phase 2: move admin-engaged tickets that have been quiet for 7 days to the
+  // system-only "Assumed Resolved" status (counts as a resolution in the rate,
+  // separate from human "Resolved"; a new user message reopens it). The pure
+  // module assumed-resolved.ts owns the per-ticket decision; the DB write is a
+  // GUARDED conditional update (WHERE status IN ASSUME_RESOLVABLE_STATUSES) so a
+  // concurrent human/ingestion change between read and write is never clobbered.
+  //
+  // Fail-safe kill switch (default OFF): the sweep ships dormant so the backlog
+  // can be previewed before any status is auto-changed. Enable on Railway with
+  // ASSUMED_RESOLVE_ENABLED=true once the candidate list is signed off.
+  const ASSUMED_RESOLVE_ENABLED = process.env.ASSUMED_RESOLVE_ENABLED === "true";
+  // Bounded per sweep — the eligible active backlog is intended to stay small;
+  // the interval re-runs, so a cap simply spreads a large one-time backfill.
+  const ASSUME_RESOLVE_SWEEP_LIMIT = 500;
+  async function assumeResolveQuietTickets() {
+    try {
+      if (!ASSUMED_RESOLVE_ENABLED) return;
+      const supabase = getSupabase();
+      const { data: rows, error } = await supabase
+        .from("tickets")
+        .select("id, status, raw_text, first_admin_reply_at, last_message_at, created_at")
+        .in("status", ASSUME_RESOLVABLE_STATUSES)
+        .eq("is_admin_message", false)
+        .not(
+          "category",
+          "in",
+          '("General Question","Praise","Spam/Irrelevant")',
+        )
+        .order("last_message_at", { ascending: true, nullsFirst: true })
+        .limit(ASSUME_RESOLVE_SWEEP_LIMIT);
+      if (error) {
+        logger.warn("AssumeResolve", "Sweep query failed", {
+          error: error.message,
+        });
+        return;
+      }
+      if (!rows || rows.length === 0) return;
+      const now = Date.now();
+      let resolved = 0;
+      for (const t of rows) {
+        // Admin engaged the thread at least once: an [ADMIN_REPLY] block in the
+        // accumulated raw_text (reliable on legacy tickets) OR the
+        // first_admin_reply_at column (set on newer reply-attach paths).
+        const adminEngaged =
+          (typeof t.raw_text === "string" &&
+            t.raw_text.includes("[ADMIN_REPLY]")) ||
+          t.first_admin_reply_at != null;
+        const lastActivityMs = new Date(
+          t.last_message_at ?? t.created_at,
+        ).getTime();
+        if (
+          !shouldAssumeResolved(t.status, adminEngaged, lastActivityMs, now)
+        ) {
+          continue;
+        }
+        const nowISO = new Date().toISOString();
+        const { error: updErr, count } = await supabase
+          .from("tickets")
+          .update(
+            {
+              status: "Assumed Resolved",
+              resolved_at: nowISO,
+              updated_at: nowISO,
+            },
+            { count: "exact" },
+          )
+          .eq("id", t.id)
+          // Guard: only flip if still in an eligible state (no clobber of a
+          // concurrent human/ingestion change between the read and this write).
+          .in("status", ASSUME_RESOLVABLE_STATUSES);
+        if (updErr) {
+          logger.warn("AssumeResolve", `Failed to assume-resolve ${t.id}`, {
+            error: updErr.message,
+          });
+          continue;
+        }
+        if (count && count > 0) resolved++;
+      }
+      if (resolved > 0) {
+        logger.info(
+          "AssumeResolve",
+          `Assumed-resolved ${resolved} quiet admin-engaged ticket(s) (>= ${ASSUMED_RESOLVED_QUIET_DAYS}d)`,
+        );
+      }
+    } catch (e) {
+      logger.warn("AssumeResolve", "Sweep failed", { error: e.message });
+    }
+  }
+  setTimeout(assumeResolveQuietTickets, 3 * 60 * 1e3);
+  setInterval(assumeResolveQuietTickets, 60 * 60 * 1e3);
   const GROQ_SCHEMA = {
     type: "json_schema",
     json_schema: {
@@ -1773,8 +1868,10 @@ ${lines.join("\n---\n")}`;
         const { data: recentTickets } = await supabase
           .from("tickets")
           .select("*")
+          // Include "Assumed Resolved" so an explicit thank-you converts a
+          // system-assumed close into a human-confirmed Resolved.
+          .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved"])
           .eq("sender_hash", senderHash)
-          .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
           .order("created_at", { ascending: false })
           .limit(1);
         if (recentTickets && recentTickets.length > 0) {
@@ -1989,7 +2086,9 @@ ${lines.join("\n---\n")}`;
               .from("tickets")
               .select("*")
               .eq("sender_hash", senderHash)
-              .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
+              // Include "Assumed Resolved" so a returning user's reply re-finds
+              // (and reopens) a ticket the sweep auto-closed.
+              .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved"])
               .order("created_at", { ascending: false })
               .limit(1);
             if (recentTickets && recentTickets.length > 0) {
@@ -2004,15 +2103,18 @@ ${lines.join("\n---\n")}`;
             const newRawText =
               parentTicket.raw_text +
               `\n\n[USER_REPLY]\n${text}\n[/USER_REPLY]`;
-            // The user has responded, so a ticket parked on "Awaiting User"
-            // goes back into the admin queue as "In Review".
+            // The user has responded, so a ticket parked on "Awaiting User" —
+            // or auto-closed as "Assumed Resolved" — goes back into the admin
+            // queue as "In Review". Reopening clears the assumed-close
+            // resolved_at so the ticket counts as active again.
+            const reopens =
+              parentTicket.status === "Awaiting User" ||
+              parentTicket.status === "Assumed Resolved";
             await supabase
               .from("tickets")
               .update({
                 raw_text: newRawText,
-                ...(parentTicket.status === "Awaiting User"
-                  ? { status: "In Review" }
-                  : {}),
+                ...(reopens ? { status: "In Review", resolved_at: null } : {}),
                 last_message_at: msgDateISO,
                 updated_at: new Date().toISOString(),
               })
@@ -3393,23 +3495,28 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       }
       const dbStats = statsData || {};
       const resolvedCount = dbStats.resolvedCount || 0;
+      const assumedResolvedCount = dbStats.assumedResolvedCount || 0;
       const activeCount = dbStats.activeCount || 0;
+      // System auto-resolutions count toward the rate alongside human
+      // resolutions (Phase 2 decision), kept as a separate count in the payload.
+      const totalResolved = resolvedCount + assumedResolvedCount;
       const stats = {
         // From the DB: open/active/inReview/escalated/awaitingUser counts,
-        // medianResponseMs + respondedCount, resolved + resolvedToday counts,
-        // per-urgency active counts, ticketsTodayCount, categoryCount, and
-        // volumeByDay (per-Lagos-day ticket counts for the volume chart,
-        // which previously needed every raw row shipped to the browser).
+        // medianResponseMs + respondedCount, resolved + assumedResolved +
+        // resolvedToday counts, per-urgency active counts, ticketsTodayCount,
+        // categoryCount, and volumeByDay (per-Lagos-day ticket counts for the
+        // volume chart, which previously needed every raw row shipped).
         ...dbStats,
         totalCount: count ?? 0,
         // Dismissed tickets (spam/chatter) are NOT resolutions — the rate is
-        // Resolved ÷ (Resolved + Active), Dismissed excluded everywhere.
+        // (Resolved + Assumed Resolved) ÷ (those + Active), Dismissed excluded.
         resolutionRate:
-          resolvedCount + activeCount > 0
-            ? Math.round((resolvedCount / (resolvedCount + activeCount)) * 100)
+          totalResolved + activeCount > 0
+            ? Math.round((totalResolved / (totalResolved + activeCount)) * 100)
             : 0,
         resolutionData: [
           { name: "Resolved", value: resolvedCount },
+          { name: "Assumed Resolved", value: assumedResolvedCount },
           { name: "Active", value: activeCount },
         ],
       };
@@ -3441,6 +3548,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         "Escalated",
         "Awaiting User",
         "Resolved",
+        "Assumed Resolved",
         "Dismissed",
       ];
       if (!status || !VALID_STATUSES.includes(status)) {
@@ -3465,9 +3573,14 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       const statusUpdate: Record<string, any> = {
         status,
         updated_at: nowISO,
-        // resolved_at records when the ticket was closed; reopening clears it
+        // resolved_at records when the ticket was closed; reopening clears it.
+        // "Assumed Resolved" is a closed state too, so it stamps resolved_at.
         resolved_at:
-          status === "Resolved" || status === "Dismissed" ? nowISO : null,
+          status === "Resolved" ||
+          status === "Assumed Resolved" ||
+          status === "Dismissed"
+            ? nowISO
+            : null,
       };
       const { error: updateError } = await supabase
         .from("tickets")
