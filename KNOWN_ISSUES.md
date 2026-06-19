@@ -2,6 +2,35 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## ⏭️ NEXT-SESSION PRIORITY — Full system logic & KPI-correctness audit (requested 2026-06-19)
+
+**The trigger:** the user sees **too many tickets stuck "In Review"** and a **resolution rate that reads far too low** — which unfairly paints a very active, responsive admin as poor-performing. A support tool must reflect reality, never produce false-negative readings. Audit the WHOLE system's logic for real-world soundness, and verify every KPI computes what it claims.
+
+**Part A — KPI math correctness** (reconcile every dashboard number against direct SQL on the live DB `dovgochitqpuvmneqeqz`):
+- Resolution Rate = Resolved ÷ (Resolved + Active): confirm the formula AND correct bucketing (Dismissed excluded; the four active states counted). Compare the dashboard value to ground-truth SQL.
+- The "In Review" count, Avg Response Time, Resolved Today (Lagos day), volume-by-day, and the status/category/urgency breakdowns — reconcile each against SQL.
+- Confirm filters reach BOTH the table query and the `tickets_stats` RPC.
+
+**Part B — Real-world workflow soundness (the core concern).** In a real Telegram support group, **most resolutions are invisible to the system**:
+- Sensitive issues move to the admin's **DMs** ("please DM me / send your email") — the group sees the hand-off but never the resolution, so the ticket sits "In Review" forever.
+- A satisfied user just **goes quiet** — no explicit "thanks, resolved" — so nothing flips it to Resolved.
+- The auto-resolver only fires on a clearly **affirmative/definitive** admin reply ("Yes you can", "Done"); the many helpful-but-non-definitive replies ("send your transaction ID", "we're checking") correctly move Open→In Review but never resolve.
+- Net effect: **"In Review" becomes a graveyard of actually-resolved tickets**, inflating the Active denominator and cratering the resolution rate — exactly the false-low reading observed.
+
+Model how a group REALLY runs and propose product behavior (these are PRODUCT DECISIONS — present options + trade-offs and get the user's sign-off before changing the resolution-rate definition, which is a documented product decision):
+- A time-based "assumed resolved" for tickets quiet (no new user message) for N hours/days after an admin reply.
+- Distinct handling for "taken to DM" so it doesn't count as unresolved-active forever.
+- Reconsider what belongs in the resolution-rate denominator (should aged In Review / Awaiting User count against the admin?).
+- Whether "user went silent after admin engaged" should count as a probable resolution.
+
+**Part C — Noise & grouping (banter and rants):**
+- Friendly banter / back-and-forth chatter and user↔user chat must NOT create tickets — audit noise gating against real recent group messages; hunt for false-positive tickets.
+- One issue ranted across many messages must group into ONE ticket — audit conversation grouping (5-min window) on real data, incl. edge cases (gaps > window, interleaved senders).
+
+**Approach:** read-only investigation first — reconcile dashboard numbers vs. live SQL, sample real recent tickets in each status, characterize WHY tickets land where they do. Deliver findings + proposed fixes/product-decisions BEFORE changing anything. Likely change sites: `server.ts` (status transitions, auto-resolve, noise gating), the `tickets_stats` SQL function, possibly a migration.
+
+---
+
 ## 1. Repeated Fixes & Chronic Bugs
 *   **LLM Schema Hallucinations:** The Groq/LLaMA integration has repeatedly returned JSON payloads with incorrect keys (e.g., `priority` instead of `urgency`) or varying casing. This was patched multiple times: first with stricter system prompts, then with Zod validation, and finally with a custom `normalizeCategory` fallback function. It remains an area of fragility if the model updates or shifts behavior.
 *   **Supabase Row Level Security (RLS) Conflicts:** Initially, the backend attempted to insert records using the `SUPABASE_ANON_KEY`, which failed because RLS policies blocked anonymous inserts. This was fixed by exclusively using `SUPABASE_SERVICE_ROLE_KEY` on the backend, but any future frontend direct-database writes will instantly hit this wall if not properly scoped.
