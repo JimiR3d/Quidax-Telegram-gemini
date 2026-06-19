@@ -12,9 +12,9 @@ All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 ### Findings
 
 **Part A — KPI math (mostly correct; 2 real issues + minor):**
-- 🔴 **A1 Avg Response Time is the MEAN, outlier-poisoned.** 54 responded tickets: median **390s (6.5min)**, p90 67min, 22/54 (41%) under 5min — but the card shows the **mean 30,333s (8.4h)**, dragged by ONE 18.1-day outlier (max 1,567,426s, a 90s-window/quoted heuristic mis-attach). `src/App.tsx:1225` renders `avgResponseMs` raw; `tickets_stats` computes `avg()`. → switch to median.
-- 🟠 **A2 Dismissable categories sit Active.** 9 active tickets are Spam/Irrelevant (6) or Praise (3) (both in `AUTO_DISMISS_CATEGORIES`) — reclassified to noise AFTER insert, so the insert-time auto-dismiss never caught them; they count in the Active denominator.
-- 🟡 **A3 minor:** `tickets_stats.activeCount` counts a `'Classifying'` status the CHECK constraint forbids (dead branch). 38/46 Resolved have `resolved_at = NULL` (legacy) → invisible to "Resolved Today" forever. Filters DO reach BOTH the table query and the RPC (status deliberately table-only) — verified, no bug.
+- ✅ **A1 (FIXED Phase 1) Avg Response Time was the MEAN, outlier-poisoned.** 54 responded tickets: median **390s (6.5min)**, p90 67min, 22/54 (41%) under 5min — but the card shows the **mean 30,333s (8.4h)**, dragged by ONE 18.1-day outlier (max 1,567,426s, a 90s-window/quoted heuristic mis-attach). `src/App.tsx:1225` renders `avgResponseMs` raw; `tickets_stats` computes `avg()`. → switch to median.
+- ✅ **A2 (FIXED Phase 1) Dismissable categories sat Active.** 9 active tickets were Spam/Irrelevant (6) or Praise (3) — reclassified to noise AFTER insert, so the insert-time auto-dismiss never caught them. They were Dismissed 2026-06-19; noise categories are also now excluded from the `activeCount` denominator regardless of status.
+- 🟡 **A3 (dead branch FIXED Phase 1):** `tickets_stats.activeCount` no longer counts the `'Classifying'` status the CHECK constraint forbids. 38/46 Resolved have `resolved_at = NULL` (legacy) → invisible to "Resolved Today" forever. Filters DO reach BOTH the table query and the RPC (status deliberately table-only) — verified, no bug.
 
 **Part B — "In Review" is a graveyard:**
 - 96/139 In-Review quiet >7 days; 133 quiet >3d; only 3 active in last 24h. Oldest created 2026-05-09 (6 weeks).
@@ -39,11 +39,11 @@ All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 3. **Noise = EXCLUDE, NEVER DELETE** (user was explicit about not losing a misclassified real issue): never drop/delete any message; exclude General Question/Spam/Irrelevant/Praise from the resolution-rate DENOMINATOR (safe — doesn't hide them); keep suspected banter visible + reversible, just out of the main triage lane (GenQ already drops from "Issues Only"; Spam/Praise → Dismissed but filterable/reversible in /train); uncertainty already errs to visibility (a FAILED classification stays Open + `[NEEDS REVIEW]`, never dismissed); pre-filter banter heuristics (bare "/p TICKER", pasted news) route to the noise lane, NOT a hard drop.
 4. **Response stat:** median (not mean).
 
-### IMPLEMENTATION PLAN (phased; complete + confirm each before the next; NOTHING coded yet)
-**Phase 1 — Honest KPIs (no schema, no ingestion-behavior change):**
-- 1a. `tickets_stats`: Avg Response → median; relabel the card "Median Response Time".
-- 1b. Exclude General Question/Spam/Irrelevant/Praise from the Active denominator (SQL fn + `resolutionRate` JS). Moves the headline 16%→~22% honestly, no data touched.
-- 1c. Remove the dead `'Classifying'` branch; one-time previewed Dismiss of the 9 Spam/Praise sitting Active.
+### IMPLEMENTATION PLAN (phased; complete + confirm each before the next)
+**✅ Phase 1 — Honest KPIs — DONE & VERIFIED (2026-06-19, migration `016_kpi_honest`):**
+- ✅ 1a. `tickets_stats` now returns `medianResponseMs` via `percentile_cont(0.5)` (not `avg()`); `src/App.tsx` renames `avgResponseMs`→`medianResponseMs` and the card reads "Median Response Time". Live median = 390,500 ms (6.5 min) vs the old mean 8.4 h.
+- ✅ 1b. `activeCount` in `tickets_stats` excludes General Question / Praise / Spam/Irrelevant. The `resolutionRate` JS at `server.ts:3407` needed NO change — it reads `activeCount` from the RPC, so the SQL fix flows through. Live: Active 240→161, rate 16%→22%.
+- ✅ 1c. Dead `'Classifying'` branch removed from `activeCount`. The 9 Spam/Praise tickets that were sitting In Review were Dismissed (previewed first, reversible in /train) → In Review 139→130. All reconciled against live SQL on `dovgochitqpuvmneqeqz`. Verified: `tsc` clean, 172/172 tests, `npm run build` clean. (Not yet committed at time of writing.)
 
 **Phase 2 — `Assumed Resolved` + 7-day auto-resolve sweep ⚠️ NEEDS EXPLICIT SCHEMA-CHANGE CONFIRM:**
 - 2a. Migration widening `tickets_status_check` to add `Assumed Resolved` (additive/reversible; `ls supabase/migrations/` FIRST — 015 already used, so this is 016).
