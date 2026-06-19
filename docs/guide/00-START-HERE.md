@@ -82,11 +82,11 @@ One principle runs through the entire codebase and this guide: **evidence over a
 - [x] Part 5 — Subsystems Deep Dive
 - [x] Part 6 — Security and Safety
 - [x] Part 7 — The Bug Stories
-- [ ] Part 8 — Interview Prep
-- [ ] Part 9 — Demo Script
-- [ ] Part 10 — Role Positioning
-- [ ] Part 11 — Glossary
-- [ ] Assembled master markdown file
-- [ ] Word (.docx) export
+- [x] Part 8 — Interview Prep
+- [x] Part 9 — Demo Script
+- [x] Part 10 — Role Positioning
+- [x] Part 11 — Glossary
+- [x] Assembled master markdown file (`PULSEDESK_MASTER_GUIDE.md` in the project root)
+- [x] Word (.docx) export (`PULSEDESK_MASTER_GUIDE.docx` in the project root)
 
 Now turn to **Part 1**.
