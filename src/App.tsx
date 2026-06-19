@@ -154,7 +154,7 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
 
   useEffect(() => { loadNext(); }, [loadNext]);
 
-  const submitVerdict = async (verdict: "correct" | "wrong") => {
+  const submitVerdict = async (verdict: "correct" | "wrong" | "skip") => {
     if (!ticket || submitting) return;
     if (verdict === "wrong" && !selectedCategory) return;
     setSubmitting(true);
@@ -269,22 +269,32 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
               </div>
 
               {!wrongMode ? (
-                <div className="flex gap-3">
+                <div className="space-y-3">
+                  <div className="flex gap-3">
+                    <button
+                      id="train-correct"
+                      onClick={() => submitVerdict("correct")}
+                      disabled={submitting}
+                      className="flex-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-emerald-500/20"
+                    >
+                      {submitting ? "Saving..." : "✓ Correct"}
+                    </button>
+                    <button
+                      id="train-wrong"
+                      onClick={() => setWrongMode(true)}
+                      disabled={submitting}
+                      className="flex-1 bg-rose-500/80 hover:bg-rose-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-rose-500/20"
+                    >
+                      ✗ Wrong — fix it
+                    </button>
+                  </div>
                   <button
-                    id="train-correct"
-                    onClick={() => submitVerdict("correct")}
+                    id="train-skip"
+                    onClick={() => submitVerdict("skip")}
                     disabled={submitting}
-                    className="flex-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-emerald-500/20"
+                    className="w-full bg-white/5 hover:bg-white/10 border border-white/10 disabled:opacity-50 text-white/50 hover:text-white/70 font-bold rounded-xl px-4 py-2.5 text-xs transition"
                   >
-                    {submitting ? "Saving..." : "✓ Correct"}
-                  </button>
-                  <button
-                    id="train-wrong"
-                    onClick={() => setWrongMode(true)}
-                    disabled={submitting}
-                    className="flex-1 bg-rose-500/80 hover:bg-rose-600 disabled:opacity-50 text-white font-bold rounded-xl px-4 py-3 text-sm transition shadow-lg shadow-rose-500/20"
-                  >
-                    ✗ Wrong — fix it
+                    ⊘ Skip — not a clear support issue
                   </button>
                 </div>
               ) : (

@@ -1440,6 +1440,9 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
       const { data: rows, error } = await supabase
         .from("corrections")
         .select("message_text, original_category, correct_category")
+        // human_skip rows are "leave this one out" decisions, not teaching
+        // examples — never inject them as few-shot corrections.
+        .neq("correction_source", "human_skip")
         .order("created_at", { ascending: false })
         .limit(200);
       if (error || !rows || rows.length === 0) return "";
@@ -3806,7 +3809,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
 
   const TrainCorrectSchema = z.object({
     ticketId: z.string().uuid(),
-    verdict: z.enum(["correct", "wrong"]),
+    verdict: z.enum(["correct", "wrong", "skip"]),
     correctCategory: z.enum(VALID_CATEGORIES).optional(),
   });
   app.post("/api/train/correct", requireAuth, async (req, res) => {
@@ -3821,6 +3824,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           .status(400)
           .json({ error: "correctCategory is required when verdict is wrong" });
       }
+      const isSkip = verdict === "skip";
       const supabase = getSupabase();
       const { data: ticket } = await supabase
         .from("tickets")
@@ -3830,25 +3834,31 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       if (!ticket || ticket.is_admin_message) {
         return res.status(404).json({ error: "Ticket not found" });
       }
-      // Double-submit guard: one human review per ticket.
+      // Double-submit guard: one human review per ticket. A Correct/Wrong
+      // verdict (human_ui) and a Skip (human_skip) both count — either leaves a
+      // corrections row, so the ticket should never come back around in /train.
       const { data: existing } = await supabase
         .from("corrections")
         .select("id")
         .eq("ticket_id", ticketId)
-        .eq("correction_source", "human_ui")
+        .in("correction_source", ["human_ui", "human_skip"])
         .limit(1);
       if (existing && existing.length > 0) {
         return res.json({ success: true, alreadyReviewed: true });
       }
+      // A Skip records the reviewer's "leave this one out" decision as a
+      // human-confirmed no-op (original = correct = current category) under a
+      // distinct source, so it is excluded from few-shot injection and /verify
+      // while still marking the ticket reviewed (drops out of the /train queue).
       const finalCategory =
-        verdict === "correct" ? ticket.category : correctCategory;
+        verdict === "wrong" ? correctCategory : ticket.category;
       const { error: insertError } = await supabase.from("corrections").insert({
         ticket_id: ticket.id,
         message_text: userThreadText(ticket.raw_text),
         original_category: ticket.category,
         correct_category: finalCategory,
         corrected_by: req.user.userId || "dashboard_admin",
-        correction_source: "human_ui",
+        correction_source: isSkip ? "human_skip" : "human_ui",
       });
       if (insertError) throw new Error(insertError.message);
       if (verdict === "wrong" && finalCategory !== ticket.category) {
@@ -3925,6 +3935,9 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .select(
           "message_text, original_category, correct_category, correction_source, created_at",
         )
+        // Skips are not human-labelled ground truth — exclude them so the
+        // verify run only re-scores real Correct/Wrong reviews.
+        .neq("correction_source", "human_skip")
         .order("created_at", { ascending: false })
         .limit(500);
       if (error) throw new Error(error.message);
