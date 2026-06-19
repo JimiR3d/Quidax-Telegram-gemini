@@ -3396,7 +3396,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       const activeCount = dbStats.activeCount || 0;
       const stats = {
         // From the DB: open/active/inReview/escalated/awaitingUser counts,
-        // avgResponseMs + respondedCount, resolved + resolvedToday counts,
+        // medianResponseMs + respondedCount, resolved + resolvedToday counts,
         // per-urgency active counts, ticketsTodayCount, categoryCount, and
         // volumeByDay (per-Lagos-day ticket counts for the volume chart,
         // which previously needed every raw row shipped to the browser).

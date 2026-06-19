@@ -855,7 +855,7 @@ export default function App() {
   const inReviewCount   = globalStats?.inReviewCount || 0;
   const escalatedCount  = globalStats?.escalatedCount || 0;
   const awaitingUserCount = globalStats?.awaitingUserCount || 0;
-  const avgResponseMs   = globalStats?.avgResponseMs ?? null;
+  const medianResponseMs = globalStats?.medianResponseMs ?? null;
   const resolvedTodayCount = globalStats?.resolvedTodayCount || 0;
   const resolvedCount   = globalStats?.resolvedCount || 0;
   const totalIssues     = globalStats ? (globalStats.criticalCount + globalStats.highCount + globalStats.mediumCount + globalStats.lowCount) : 0;
@@ -1218,14 +1218,14 @@ export default function App() {
               </div>
             </div>
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
-              <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTitle("Avg Response Time")}>
-                {getKpiTitle("Avg Response Time")}
+              <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTitle("Median Response Time")}>
+                {getKpiTitle("Median Response Time")}
               </p>
               <div className="flex items-end justify-between w-full">
-                <span className={`text-4xl font-bold ${avgResponseMs !== null ? "text-sky-400" : "text-white/30"}`}>{formatDuration(avgResponseMs)}</span>
+                <span className={`text-4xl font-bold ${medianResponseMs !== null ? "text-sky-400" : "text-white/30"}`}>{formatDuration(medianResponseMs)}</span>
               </div>
               <p className="text-[11px] text-white/40 mt-2 truncate">
-                {avgResponseMs !== null ? "first admin reply, tracked tickets" : "no tracked replies yet"}
+                {medianResponseMs !== null ? "first admin reply, tracked tickets" : "no tracked replies yet"}
               </p>
             </div>
           </div>
