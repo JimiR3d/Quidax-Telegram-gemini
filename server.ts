@@ -65,6 +65,11 @@ import {
   buildResolutionMessages,
   parseResolutionDecision,
 } from "./conversation-resolution";
+import {
+  filterReconcileCandidates,
+  buildRepresentationProbe,
+  isSystemBotMessage,
+} from "./message-reconciliation";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -84,6 +89,14 @@ const GROUPING_WINDOW_MS =
 // genuinely new issue. Default 6 hours; env-overridable.
 const GROUPING_ACTIVE_WINDOW_MS =
   Number(process.env.GROUPING_ACTIVE_WINDOW_MS) || 6 * 60 * 60 * 1000;
+// Phase 1 (audit 2026-06-20) — bound the quoted-reply "no parent match" fallback.
+// A user's quoted reply whose quoted parent did not resolve to a ticket used to
+// attach to the sender's most-recent active ticket REGARDLESS of age, landing a
+// fresh "Sol/USDC" reply on a month-old ticket. Past this window we fall through
+// to grouping / a new ticket (visible and recoverable) instead of a wrong-thread
+// attach. Default 48 hours; env-overridable.
+const QUOTED_FALLBACK_MAX_AGE_MS =
+  Number(process.env.QUOTED_FALLBACK_MAX_AGE_MS) || 48 * 60 * 60 * 1000;
 var REQUIRED_ENV_VARS = [
   "GROQ_API_KEY",
   "SUPABASE_URL",
@@ -1357,6 +1370,180 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
   setTimeout(inferResolvedFromConversation, 4 * 60 * 1e3);
   setInterval(inferResolvedFromConversation, 60 * 60 * 1e3);
 
+  // Phase 1 (2026-06-20): self-healing reconciliation. A message is written to
+  // `messages` BEFORE its ticket is built; if the build throws, the message is
+  // orphaned forever (the top-of-function dedup then skips it on every re-scan).
+  // This sweep finds those orphans in `messages` and replays them through the
+  // SAME ticket-build path so nothing stays lost. Idempotent: a recovered message
+  // becomes a ticket root or a folded reply block, so the next sweep filters it
+  // out (filterReconcileCandidates root-id check + the text-representation probe).
+  //
+  // Two fail-safe flags mirror the bot rails and the resolution-infer sweep:
+  //   INGEST_RECONCILE_ENABLED  default OFF — master switch (ships dormant).
+  //   INGEST_RECONCILE_DRY_RUN  default ON  — when on, logs what it WOULD recover
+  //                                            and writes nothing.
+  const INGEST_RECONCILE_ENABLED =
+    process.env.INGEST_RECONCILE_ENABLED === "true";
+  const INGEST_RECONCILE_DRY_RUN =
+    process.env.INGEST_RECONCILE_DRY_RUN !== "false";
+  const RECONCILE_LOOKBACK_HOURS = Number(
+    process.env.INGEST_RECONCILE_LOOKBACK_HOURS || 48,
+  );
+  // Bounded per sweep so a large one-time backlog is spread across runs; recovery
+  // calls Groq (classification) so they are spaced like the other batch loops.
+  const RECONCILE_MAX_PER_SWEEP = Number(
+    process.env.INGEST_RECONCILE_MAX_PER_SWEEP || 30,
+  );
+  async function reconcileOrphanMessages(reason) {
+    try {
+      if (!INGEST_RECONCILE_ENABLED) return;
+      const supabase = getSupabase();
+      const sinceISO = new Date(
+        Date.now() - RECONCILE_LOOKBACK_HOURS * 60 * 60 * 1e3,
+      ).toISOString();
+      const { data: rawMsgs, error: msgErr } = await supabase
+        .from("messages")
+        .select(
+          "id, telegram_message_id, raw_text, sender_hash, message_timestamp, group_id",
+        )
+        .gte("message_timestamp", sinceISO)
+        .order("message_timestamp", { ascending: true });
+      if (msgErr) {
+        logger.warn("Reconcile", "Sweep message query failed", {
+          error: msgErr.message,
+        });
+        return;
+      }
+      if (!rawMsgs || rawMsgs.length === 0) return;
+      const candidatesRaw = rawMsgs.map((m) => ({
+        id: m.id,
+        telegramMessageId: String(m.telegram_message_id),
+        rawText: m.raw_text,
+        senderHash: m.sender_hash,
+        messageTimestamp: m.message_timestamp,
+        groupId: m.group_id,
+      }));
+      // Ticket roots among this window's ids (one IN-query).
+      const windowTgIds = candidatesRaw.map((c) => c.telegramMessageId);
+      const rootTelegramIds = new Set<string>();
+      for (let i = 0; i < windowTgIds.length; i += 200) {
+        const slice = windowTgIds.slice(i, i + 200);
+        const { data: rootRows } = await supabase
+          .from("tickets")
+          .select("telegram_message_id")
+          .in("telegram_message_id", slice);
+        (rootRows || []).forEach((r) =>
+          rootTelegramIds.add(String(r.telegram_message_id)),
+        );
+      }
+      // Sender hashes that belong to admin-authored tickets — never resurrect an
+      // admin message (they are dropped by design when unattached).
+      const adminSenderHashes = new Set<string>();
+      const { data: adminRows } = await supabase
+        .from("tickets")
+        .select("sender_hash")
+        .eq("is_admin_message", true);
+      (adminRows || []).forEach(
+        (r) => r.sender_hash && adminSenderHashes.add(r.sender_hash),
+      );
+      const candidates = filterReconcileCandidates(candidatesRaw, {
+        rootTelegramIds,
+        adminSenderHashes,
+      });
+      if (candidates.length === 0) return;
+      let scanned = 0;
+      let recovered = 0;
+      for (const c of candidates) {
+        if (scanned >= RECONCILE_MAX_PER_SWEEP) break;
+        scanned++;
+        // Only resurrect messages that would become a REAL, actionable ticket.
+        // Group system/bot templates (welcome, ban notices) can't be re-detected
+        // via checkIsAdmin here (no senderId in `messages`), and the normal noise
+        // gate would otherwise let the long welcome greetings through as Open
+        // tickets. Skip anything the live pipeline would have dropped or merely
+        // Dismissed — those were never the lost issues we are recovering.
+        if (
+          isSystemBotMessage(c.rawText) ||
+          !shouldProcessMessage(c.rawText, learnedKeywordCache) ||
+          isBanterNoise(c.rawText)
+        ) {
+          continue;
+        }
+        // Already attached inside some ticket's raw_text? (era-agnostic: catches
+        // every attach path past and future without needing an id= tag).
+        const probe = buildRepresentationProbe(c.rawText);
+        if (probe) {
+          const { data: hit } = await supabase
+            .from("tickets")
+            .select("id")
+            .ilike("raw_text", `%${probe}%`)
+            .limit(1);
+          if (hit && hit.length > 0) continue;
+        }
+        if (INGEST_RECONCILE_DRY_RUN) {
+          recovered++;
+          logger.info(
+            "Reconcile",
+            `[DRY] would recover orphan message ${c.telegramMessageId}`,
+            { preview: String(c.rawText).slice(0, 60) },
+          );
+          continue;
+        }
+        const msgDateUnix = Math.floor(
+          new Date(c.messageTimestamp).getTime() / 1e3,
+        );
+        try {
+          const t = await processAndIngestMessage(
+            c.rawText,
+            c.telegramMessageId,
+            c.groupId,
+            null, // replyToMsgId — treat as a fresh message; grouping re-stitches
+            msgDateUnix,
+            false, // isAdminSender — admins were already filtered out
+            null, // telegramDeepLink — rebuilt from group/id inside
+            false, // skipPreFilter — banter still gets Dismissed, as live
+            null, // senderId — overridden by reconcileOpts.senderHash below
+            "",
+            { senderHash: c.senderHash, existingMessageId: c.id },
+          );
+          if (t) {
+            recovered++;
+            logger.info(
+              "Reconcile",
+              `Recovered orphan message ${c.telegramMessageId} into ticket ${t.id}`,
+            );
+          }
+        } catch (e) {
+          logger.warn(
+            "Reconcile",
+            `Failed to recover orphan message ${c.telegramMessageId}`,
+            { error: e.message },
+          );
+        }
+        // Space the Groq classification calls (free-tier), like the other loops.
+        await new Promise((r) => setTimeout(r, 2100));
+      }
+      logger.info(
+        "Reconcile",
+        `${reason}: scanned ${scanned}/${candidates.length} candidate(s), ${
+          INGEST_RECONCILE_DRY_RUN ? "would recover" : "recovered"
+        } ${recovered}${INGEST_RECONCILE_DRY_RUN ? " (dry-run)" : ""}`,
+      );
+    } catch (e) {
+      logger.error("Reconcile", "Sweep crashed", { error: e.message });
+    }
+  }
+  // Startup delay is env-overridable so a local launcher run can trigger the
+  // sweep quickly for verification; prod keeps the default 5-minute settle.
+  const RECONCILE_STARTUP_DELAY_MS = Number(
+    process.env.INGEST_RECONCILE_STARTUP_DELAY_MS || 5 * 60 * 1e3,
+  );
+  setTimeout(
+    () => reconcileOrphanMessages("startup sweep"),
+    RECONCILE_STARTUP_DELAY_MS,
+  );
+  setInterval(() => reconcileOrphanMessages("periodic sweep"), 60 * 60 * 1e3);
+
   const GROQ_SCHEMA = {
     type: "json_schema",
     json_schema: {
@@ -2013,18 +2200,28 @@ ${lines.join("\n---\n")}`;
     skipPreFilter,
     senderId,
     senderUsername = "",
+    // Phase 1 reconciliation (message-reconciliation.ts): when set, this call is
+    // rebuilding a ticket from an ALREADY-PERSISTED `messages` row that was
+    // orphaned by an earlier failure. It carries the stored sender_hash (so a
+    // recovered conversation re-groups instead of fragmenting) and the existing
+    // messages.id (so no duplicate row is inserted). null on every live path =>
+    // identical behaviour to before.
+    reconcileOpts = null,
   ) {
-    const senderHash = senderId
-      ? crypto
-          .createHash("sha256")
-          .update(String(senderId) + groupId)
-          .digest("hex")
-          .substring(0, 16)
-      : crypto
-          .createHash("sha256")
-          .update(String(telegramId) + groupId)
-          .digest("hex")
-          .substring(0, 16);
+    const senderHash =
+      reconcileOpts && reconcileOpts.senderHash
+        ? reconcileOpts.senderHash
+        : senderId
+          ? crypto
+              .createHash("sha256")
+              .update(String(senderId) + groupId)
+              .digest("hex")
+              .substring(0, 16)
+          : crypto
+              .createHash("sha256")
+              .update(String(telegramId) + groupId)
+              .digest("hex")
+              .substring(0, 16);
     logger.debug("Ingestion", "processAndIngestMessage START", {
       telegramId,
       groupId,
@@ -2045,7 +2242,15 @@ ${lines.join("\n---\n")}`;
       return null;
     }
     const supabase = getSupabase();
-    if (telegramId && !String(telegramId).startsWith("rand_")) {
+    // Reconciliation deliberately reprocesses a message whose `messages` row
+    // already exists (that row is exactly what we are rebuilding a ticket from),
+    // so the normal duplicate guard is bypassed for it. Every other path keeps
+    // the authoritative top-of-function dedup.
+    if (
+      !reconcileOpts &&
+      telegramId &&
+      !String(telegramId).startsWith("rand_")
+    ) {
       const { data: existingMsg } = await supabase
         .from("messages")
         .select("id")
@@ -2067,27 +2272,34 @@ ${lines.join("\n---\n")}`;
     // quoted-user-reply branch dropped unmatched messages with no trace, and
     // every later sweep re-dropped them identically). The 23505 handler keeps
     // the DB UNIQUE constraint as the concurrency-safe last line of dedup.
-    const { data: dbMessage, error: msgError } = await supabase
-      .from("messages")
-      .insert({
-        telegram_message_id: String(telegramId),
-        group_id: groupId,
-        raw_text: text,
-        message_timestamp: msgDateISO,
-        ingested_at: /* @__PURE__ */ new Date().toISOString(),
-        sender_hash: senderHash,
-      })
-      .select("id")
-      .single();
-    if (msgError) {
-      if (msgError.code === "23505") {
-        logger.debug(
-          "Ingestion",
-          `Duplicate message detected for telegramId ${telegramId}`,
-        );
-        return null;
+    let dbMessage;
+    if (reconcileOpts) {
+      // Recovery reuses the already-persisted row; no new insert, no new id.
+      dbMessage = { id: reconcileOpts.existingMessageId };
+    } else {
+      const { data: inserted, error: msgError } = await supabase
+        .from("messages")
+        .insert({
+          telegram_message_id: String(telegramId),
+          group_id: groupId,
+          raw_text: text,
+          message_timestamp: msgDateISO,
+          ingested_at: /* @__PURE__ */ new Date().toISOString(),
+          sender_hash: senderHash,
+        })
+        .select("id")
+        .single();
+      if (msgError) {
+        if (msgError.code === "23505") {
+          logger.debug(
+            "Ingestion",
+            `Duplicate message detected for telegramId ${telegramId}`,
+          );
+          return null;
+        }
+        throw new Error(`DB Error inserting message: ${msgError.message}`);
       }
-      throw new Error(`DB Error inserting message: ${msgError.message}`);
+      dbMessage = inserted;
     }
     const isResolution =
       /\b(thanks|thank you|resolved|fixed|worked|solved|appreciate)\b/i.test(
@@ -2313,6 +2525,13 @@ ${lines.join("\n---\n")}`;
             }
           }
           if (!parentTicket) {
+            // Bound to a RECENTLY-ACTIVE ticket (last_message_at within
+            // QUOTED_FALLBACK_MAX_AGE_MS) and pick the most-recently-active one —
+            // never a stale month-old thread. Legacy tickets with a null
+            // last_message_at fail the gte and correctly fall through.
+            const fallbackCutoff = new Date(
+              Date.now() - QUOTED_FALLBACK_MAX_AGE_MS,
+            ).toISOString();
             const { data: recentTickets } = await supabase
               .from("tickets")
               .select("*")
@@ -2320,7 +2539,8 @@ ${lines.join("\n---\n")}`;
               // Include "Assumed Resolved" so a returning user's reply re-finds
               // (and reopens) a ticket the sweep auto-closed.
               .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved"])
-              .order("created_at", { ascending: false })
+              .gte("last_message_at", fallbackCutoff)
+              .order("last_message_at", { ascending: false })
               .limit(1);
             if (recentTickets && recentTickets.length > 0) {
               parentTicket = recentTickets[0];
