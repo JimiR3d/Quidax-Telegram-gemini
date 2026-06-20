@@ -2194,9 +2194,22 @@ ${lines.join("\n---\n")}`;
         }
         logger.info(
           "Ingestion",
-          `Quoted user reply ${telegramId} (to ${replyToMsgId}) matched no active ticket - message persisted, no ticket created`,
+          `Quoted user reply ${telegramId} (to ${replyToMsgId}) matched no active ticket - creating a new ticket from the user's own message`,
         );
-        return null;
+        // Fall through (NO early return): a quoted user reply that matches no
+        // active ticket is a fresh message — the grouping branch + new-ticket
+        // insert below handle it. This previously did `return null` and SILENTLY
+        // LOST real issues that arrived as a reply to an old/welcome message
+        // (audit 2026-06-20: the 9am account-access user replied to old msgs
+        // 139564/138750 and never became a ticket; the admin's replies to them
+        // were then dropped as unattached-admin, so the whole conversation was
+        // invisible on the dashboard). The top-of-function telegram_message_id
+        // dedup keeps re-scans idempotent, and banter (replies to price/news/
+        // welcome posts) still gets Dismissed by the pre-filter/classifier
+        // (locked decision #3: exclude, never delete). We deliberately do NOT
+        // recover the quoted parent here (unlike the admin Fix 5 path) — the
+        // user's own message carries the issue and the parent is usually the
+        // welcome bot.
       }
     }
     if (isAdminSender && !replyToMsgId) {
