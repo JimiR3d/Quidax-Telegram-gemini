@@ -55,6 +55,7 @@ import {
   parseTopicShiftDecision,
 } from "./topic-shift";
 import { resolveConnectDelayMs } from "./deploy-overlap";
+import { isBanterNoise } from "./noise-prefilter";
 import {
   shouldAssumeResolved,
   ASSUME_RESOLVABLE_STATUSES,
@@ -2369,7 +2370,8 @@ ${lines.join("\n---\n")}`;
       }
     }
     const isPreFiltered =
-      !skipPreFilter && !shouldProcessMessage(text, learnedKeywordCache);
+      !skipPreFilter &&
+      (!shouldProcessMessage(text, learnedKeywordCache) || isBanterNoise(text));
     if (isPreFiltered) {
       logger.debug(
         "Ingestion",
