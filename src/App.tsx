@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { format, subDays, startOfDay, isToday, isYesterday, parseISO } from "date-fns";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock, ExternalLink, X } from "lucide-react";
+import { detectHandoff } from "../handoff-detect";
 
 // -----------------------------------------------------------------------------
 // TYPES
@@ -42,6 +43,28 @@ const URGENCY_COLORS: Record<string, string> = {
   High:     "bg-amber-500",
   Medium:   "bg-indigo-500",
   Low:      "bg-blue-500",
+};
+
+// Honest, plain-English status labels (display-only — the stored DB value is
+// unchanged, so filters/KPIs are untouched). "In Review" was misleading: it only
+// means an admin replied, not that someone is actively working it. "Assumed
+// Resolved" is a time-based guess, so we label it AS a guess.
+const STATUS_LABELS: Record<string, string> = {
+  "In Review": "Admin Replied",
+  "Assumed Resolved": "Likely Resolved",
+};
+const statusLabel = (s: string): string => STATUS_LABELS[s] ?? s;
+
+const SUMMARY_PLACEHOLDER = "Processing message...";
+// While the async classifier is still running (or if it never finished), the
+// summary is a placeholder an agent can't act on. Fall back to the customer's
+// own words (the original message, before any reply block) so the row is useful.
+const displaySummary = (t: Ticket): string => {
+  if (t.summary && t.summary !== SUMMARY_PLACEHOLDER) return t.summary;
+  const raw = t.raw_text || "";
+  const idx = raw.search(/\[(?:ADMIN_REPLY|USER_REPLY|USER_FOLLOWUP)/);
+  const original = (idx !== -1 ? raw.slice(0, idx) : raw).trim();
+  return original ? original.slice(0, 90) : "Awaiting AI classification…";
 };
 
 // -----------------------------------------------------------------------------
@@ -180,7 +203,7 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
   };
 
   return (
-    <div className="min-h-screen bg-[#05070a] text-white font-sans flex flex-col relative overflow-hidden transform-gpu">
+    <div className="min-h-[100dvh] bg-[#05070a] text-white font-sans flex flex-col relative overflow-hidden transform-gpu">
       <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] pointer-events-none transform-gpu" />
       <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] pointer-events-none transform-gpu" />
 
@@ -804,7 +827,7 @@ export default function App() {
   // -------------------------------------------------------------------------
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden transform-gpu">
+      <div className="min-h-[100dvh] bg-[#05070a] flex items-center justify-center p-6 text-white relative overflow-hidden transform-gpu">
         <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] pointer-events-none transform-gpu" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] pointer-events-none transform-gpu" />
         <form onSubmit={handleLogin} className="bg-white/5 p-8 rounded-2xl backdrop-blur-xl border border-white/10 max-w-sm w-full relative z-10 flex flex-col items-center transform-gpu">
@@ -932,7 +955,7 @@ export default function App() {
   // RENDER: Dashboard
   // -------------------------------------------------------------------------
   return (
-    <div className="min-h-screen bg-[#05070a] text-white font-sans flex flex-col relative pb-12 transform-gpu">
+    <div className="min-h-[100dvh] bg-[#05070a] text-white font-sans flex flex-col relative pb-12 overscroll-y-none transform-gpu">
       {/* Toast Notification */}
       <div className={`fixed top-4 right-4 z-50 transform transition-all duration-300 ${notification.visible ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"}`}>
         <div className={`flex items-center space-x-3 px-4 py-3 rounded-lg shadow-2xl backdrop-blur-md border ${notification.type === "success" ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"}`}>
@@ -954,8 +977,13 @@ export default function App() {
         </div>
       )}
 
-      <div className="fixed top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] pointer-events-none transform-gpu" />
-      <div className="fixed bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] pointer-events-none transform-gpu" />
+      {/* Decorative glows — clipped to the page box so they never create a
+          horizontal scrollbar, and absolute (not fixed) so they don't repaint /
+          "shake" during iOS momentum scroll. */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
+        <div className="absolute top-[-10%] left-[-10%] w-[400px] h-[400px] bg-indigo-600/20 rounded-full blur-[80px] transform-gpu" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-emerald-500/10 rounded-full blur-[90px] transform-gpu" />
+      </div>
 
       {/* Top Nav */}
       <header className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 sm:px-6 py-4 mb-2">
@@ -1151,11 +1179,11 @@ export default function App() {
                 <option value="All">All Statuses</option>
                 <option value="Classifying">Classifying</option>
                 <option value="Open">Open</option>
-                <option value="In Review">In Review</option>
+                <option value="In Review">Admin Replied</option>
                 <option value="Escalated">Escalated</option>
                 <option value="Awaiting User">Awaiting User</option>
                 <option value="Resolved">Resolved</option>
-                <option value="Assumed Resolved">Assumed Resolved</option>
+                <option value="Assumed Resolved">Likely Resolved</option>
                 <option value="Dismissed">Dismissed</option>
               </select>
             </div>
@@ -1277,17 +1305,22 @@ export default function App() {
                         <div className="w-full h-[140px] mb-4">
                           <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
                             <PieChart>
+                              {/* resolutionData order from the RPC: [Resolved, Assumed/Likely Resolved, Active].
+                                  One Cell per slice (a missing 3rd Cell was rendering the real Active count
+                                  as an unlabeled gray slice). */}
                               <Pie data={resolutionData} cx="50%" cy="50%" innerRadius={0} outerRadius={65} dataKey="value" stroke="rgba(0,0,0,0)">
                                 <Cell fill="#10b981" />
+                                <Cell fill="#14b8a6" />
                                 <Cell fill="#6366f1" />
                               </Pie>
-                              <Tooltip formatter={(value: number, _: string, props: any) => [`${value} tickets`, props?.payload?.name || ""]} contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff", fontSize: "12px" }} />
+                              <Tooltip formatter={(value: number, _: string, props: any) => [`${value} tickets`, statusLabel(props?.payload?.name || "")]} contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff", fontSize: "12px" }} />
                             </PieChart>
                           </ResponsiveContainer>
                         </div>
-                        <div className="w-full flex justify-center space-x-6">
+                        <div className="w-full flex flex-wrap justify-center gap-x-6 gap-y-2">
                           <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-emerald-500 mr-2" /><span className="text-sm text-white/80 mr-2">Resolved</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[0]?.value || 0}</span></div>
-                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Active</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1]?.value || 0}</span></div>
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-teal-500 mr-2" /><span className="text-sm text-white/80 mr-2">Likely Resolved</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[1]?.value || 0}</span></div>
+                          <div className="flex items-center"><span className="w-3 h-3 rounded-full shrink-0 bg-indigo-500 mr-2" /><span className="text-sm text-white/80 mr-2">Active</span><span className="text-sm font-bold text-white shrink-0">{resolutionData[2]?.value || 0}</span></div>
                         </div>
                       </div>
                     )}
@@ -1366,8 +1399,8 @@ export default function App() {
                       <th className="font-medium px-5 py-3">Status</th>
                       <th className="font-medium px-5 py-3">Urgency</th>
                       <th className="font-medium px-5 py-3">Summary</th>
-                      <th className="font-medium px-5 py-3">Category</th>
-                      <th className="font-medium px-5 py-3 text-right">Time</th>
+                      <th className="font-medium px-5 py-3 hidden md:table-cell">Category</th>
+                      <th className="font-medium px-5 py-3 text-right hidden md:table-cell">Time</th>
                     </tr>
                   </thead>
                   <tbody className="text-sm">
@@ -1401,11 +1434,11 @@ export default function App() {
                                   onChange={e => handleUpdateStatus(ticket.id, e.target.value)}
                                 >
                                   <option value="Open">Open</option>
-                                  <option value="In Review">In Review</option>
+                                  <option value="In Review">Admin Replied</option>
                                   <option value="Escalated">Escalated</option>
                                   <option value="Awaiting User">Awaiting User</option>
                                   <option value="Resolved">Resolved</option>
-                                  <option value="Assumed Resolved">Assumed Resolved</option>
+                                  <option value="Assumed Resolved">Likely Resolved</option>
                                   <option value="Dismissed">Dismissed</option>
                                 </select>
                               )}
@@ -1414,8 +1447,14 @@ export default function App() {
                               <span className={`text-[10px] px-2 py-0.5 rounded text-white font-bold uppercase ${URGENCY_COLORS[ticket.urgency] || "bg-white/20"}`}>{ticket.urgency}</span>
                             </td>
                             <td className="px-5 py-4 font-medium text-white/90">
-                              <div className="flex items-center gap-2">
-                                <span>{ticket.summary}</span>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span>{displaySummary(ticket)}</span>
+                                {["In Review", "Escalated", "Awaiting User"].includes(ticket.status) && detectHandoff(ticket.raw_text) && (
+                                  <span className="text-[9px] uppercase font-bold tracking-widest rounded px-1.5 py-0.5 bg-violet-500/10 text-violet-300 border border-violet-500/20 whitespace-nowrap" title="An admin redirected this user to DM or email — the resolution happens off-platform.">Handed Off</span>
+                                )}
+                                {ticket.summary === SUMMARY_PLACEHOLDER && (
+                                  <a href="/train" onClick={e => e.stopPropagation()} className="text-[10px] text-indigo-300 hover:underline whitespace-nowrap">Classify in /train →</a>
+                                )}
                                 {(() => {
                                   let link = ticket.telegram_deep_link;
                                   if (!link && ticket.group_id && ticket.telegram_message_id && ticket.telegram_message_id !== "null") {
@@ -1438,8 +1477,8 @@ export default function App() {
                                 {expandedTicketId === ticket.id ? <ChevronUp className="w-4 h-4 ml-1 text-white/40" /> : <ChevronDown className="w-4 h-4 ml-1 text-white/40" />}
                               </div>
                             </td>
-                            <td className="px-5 py-4 text-white/60">{ticket.category}</td>
-                            <td className="px-5 py-4 text-right text-white/40 whitespace-nowrap font-mono text-[10px]">{formatTicketDate(ticket.created_at)}</td>
+                            <td className="px-5 py-4 text-white/60 hidden md:table-cell">{ticket.category}</td>
+                            <td className="px-5 py-4 text-right text-white/40 whitespace-nowrap font-mono text-[10px] hidden md:table-cell">{formatTicketDate(ticket.created_at)}</td>
                           </tr>
 
                           {/* Expanded Details */}
@@ -1453,21 +1492,25 @@ export default function App() {
                                       {(() => {
                                         const raw = ticket.raw_text || "";
                                         
-                                        // The original message ends when the first tag starts
-                                        const firstTagIndex = raw.search(/\[(ADMIN_REPLY|USER_REPLY)/);
+                                        // The original message ends when the first thread tag starts.
+                                        // Must include USER_FOLLOWUP (conversation grouping) or a folded
+                                        // follow-up leaks into the "original message" as a literal tag.
+                                        const firstTagIndex = raw.search(/\[(?:ADMIN_REPLY|USER_REPLY|USER_FOLLOWUP)/);
                                         const originalMsg = firstTagIndex !== -1 ? raw.substring(0, firstTagIndex).trim() : raw.trim();
-                                        
-                                        // Extract thread replies
+
+                                        // Extract thread replies. Open tags may carry a suffix —
+                                        // " (Auto-Resolved)" or, from Phase 1, " id=123" — which the
+                                        // "[^\]]*" segment absorbs. USER_FOLLOWUP and USER_REPLY are both
+                                        // the customer's side of the thread.
                                         const replies = [];
-                                        const matches = [...raw.matchAll(/\[(ADMIN_REPLY|USER_REPLY(?: [^\]]+)?)\]([\s\S]*?)\[\/(?:ADMIN_REPLY|USER_REPLY)\]/g)];
+                                        const matches = [...raw.matchAll(/\[(ADMIN_REPLY|USER_REPLY|USER_FOLLOWUP)(?:[^\]]*)\]([\s\S]*?)\[\/(?:ADMIN_REPLY|USER_REPLY|USER_FOLLOWUP)\]/g)];
                                         matches.forEach(m => {
                                           const tag = m[1];
                                           const content = m[2].trim();
-                                          if (tag.startsWith("USER_REPLY")) {
-                                            const labelMatch = tag.match(/USER_REPLY \((.*?)\)/);
-                                            replies.push({ type: 'user', content, label: labelMatch ? labelMatch[1] : 'User Reply' });
-                                          } else {
+                                          if (tag === "ADMIN_REPLY") {
                                             replies.push({ type: 'admin', content, label: 'Admin Reply' });
+                                          } else {
+                                            replies.push({ type: 'user', content, label: tag === "USER_FOLLOWUP" ? 'User Follow-up' : 'User Reply' });
                                           }
                                         });
 
@@ -1534,7 +1577,9 @@ export default function App() {
                                       <div>
                                         <div className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">AI Suggested Action</div>
                                         <div className="text-sm font-medium text-indigo-300 bg-indigo-500/10 py-2.5 px-4 rounded-xl inline-block border border-indigo-500/20">
-                                          {ticket.suggested_action}
+                                          {ticket.suggested_action === "Pending classification..."
+                                            ? <>Not yet classified — <a href="/train" className="underline hover:opacity-80">review it in /train →</a></>
+                                            : ticket.suggested_action}
                                         </div>
                                       </div>
                                       <div className="grid grid-cols-2 gap-4">
