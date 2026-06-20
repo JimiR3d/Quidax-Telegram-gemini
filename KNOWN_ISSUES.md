@@ -6,6 +6,8 @@ This document provides a brutally honest, exhaustive tracking of every bug, susp
 
 **Status: ALL SHIPPED & LIVE. Phases 1–4 done; the 2026-06-20 manual-audit follow-up (Phases A–D2) is also done & verified in production — see the top banner of `PULSEDESK_HANDOFF.md`. Phase 2 (`Assumed Resolved` 7-day sweep) is ENABLED (`ASSUMED_RESOLVE_ENABLED=true`), and Phase D2 (conversation-aware resolution inference, `RESOLUTION_INFER_ENABLED=true`/`DRY_RUN=false`) is live. Resolution rate moved 16% (audit start) → 38.4%. The 4 product decisions remain locked.**
 
+**2026-06-20 evening: GQ queue cleanup.** The 7-day sweep and D2 both filter `NOT IN (General Question, Praise, Spam/Irrelevant)` — so GQ tickets in "In Review" accumulate permanently outside any auto-resolve path and are also excluded from the rate denominator. A one-time Dismiss of the 29 "In Review / General Question / >7d quiet" tickets was applied directly to the live DB (previewed first; all banter, answered Q&A, or DM hand-offs). In Review 101→72. Rate unchanged at 38.2%. No code change — this is a maintenance action, safe to repeat if GQ/In-Review builds up again (same WHERE clause).
+
 All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 `Dismissed 500 · In Review 139 · Open 100 · Resolved 46 · Awaiting User 1` → Active 240 → **Resolution Rate = 46/(46+240) = 16%** (30-day dashboard view = 33/219 = 15%). The dashboard math is FAITHFUL (`server.ts:3407`) — the low number is real given current bucketing, NOT an arithmetic bug.
 
