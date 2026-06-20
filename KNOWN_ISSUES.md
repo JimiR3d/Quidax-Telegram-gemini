@@ -2,6 +2,15 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## 🟢 LOST / FRAGMENTED / WRONG-STATUS TICKETS — Phase 0 + Phase 1 SHIPPED & LIVE (2026-06-20 night, commit `4eac458`)
+
+The recurring blocker (messages that never become tickets, split conversations, untrustworthy "In Review"). Plan: `.claude/plans/starry-enchanting-hammock.md`. Full detail in the top banner of `PULSEDESK_HANDOFF.md`.
+- **Root cause:** ticket-building is inline/per-message and the `messages` row is written BEFORE the ticket; the dedup keys on that row, so any throw mid-build orphans the message permanently.
+- **Phase 0 (`e227d77`):** clean + honest dashboard (renders `[USER_FOLLOWUP]`, fixes the pie's mystery gray slice, "Admin Replied"/"Likely Resolved"/"Handed Off" labels, "Processing message" fallback + /train link, iOS scroll-shake fix). Frontend-only.
+- **Phase 1 (`f00dfba` + `4eac458`):** self-healing `reconcileOrphanMessages()` sweep (LIVE: `INGEST_RECONCILE_ENABLED=true`, `DRY_RUN=false`) replays orphaned `messages` through the normal build path (idempotent; recovered the 48h backlog incl. the morning account-access convo into ONE ticket + re-attached its 2 dropped admin replies from stored data); bounded the month-old quoted-reply mis-attach (`QUOTED_FALLBACK_MAX_AGE_MS` 48h); price-bot noise filter (pattern 1d). 273/273 tests, deploy healthy (no session burn), 0 orphans remaining.
+- **STILL OPEN — Phase 2 (deferred to AFTER Monday pitch):** the full idempotent `messages→tickets` reducer using Telegram reply-to metadata as ground truth (would also retroactively un-fragment historical splits like `9ef87403`/`7c36d5f4` and recover reply-to links that were never stored). Reconciliation is the safety net until then. **Limitation:** DM/email resolutions and never-stored reply-to links remain unrecoverable from `messages` alone.
+
+
 ## ✅ KPI & WORKFLOW AUDIT — COMPLETE (read-only, 2026-06-19); IMPLEMENTATION QUEUED, decisions LOCKED
 
 **Status: ALL SHIPPED & LIVE. Phases 1–4 done; the 2026-06-20 manual-audit follow-up (Phases A–D2) is also done & verified in production — see the top banner of `PULSEDESK_HANDOFF.md`. Phase 2 (`Assumed Resolved` 7-day sweep) is ENABLED (`ASSUMED_RESOLVE_ENABLED=true`), and Phase D2 (conversation-aware resolution inference, `RESOLUTION_INFER_ENABLED=true`/`DRY_RUN=false`) is live. Resolution rate moved 16% (audit start) → 38.4%. The 4 product decisions remain locked.**
