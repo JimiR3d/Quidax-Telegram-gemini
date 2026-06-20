@@ -120,3 +120,26 @@ describe("real support issues — must never be caught", () => {
   it("does NOT catch an empty string", () =>
     expect(isBanterNoise("")).toBe(false));
 });
+
+// ─── 1d: automated price-bot ticker dump ─────────────────────────────────────
+describe("1d – automated price-bot ticker dump", () => {
+  it("catches the live tokenxoff.xyz shill (the b34db87c case)", () =>
+    expect(
+      isBanterNoise(
+        "Bitcoin X (tokenxoff.xyz) (BTC)\nPrice: $0.0001051 USD\nPrice: 0.000000001676 BTC\n24hr Change: -2.45%\n7d Change: -2.18%\nVolume: $0\nFully Diluted Market Cap: $2,207.83\nTotal Supply: 21,000,000.00\n\n🚀 View on CoinMarketCap",
+      ),
+    ).toBe(true));
+
+  it("catches a compact ticker snapshot with two labels", () =>
+    expect(
+      isBanterNoise("SOL\nPrice: $142.10 USD\nMarket Cap: $65,000,000,000"),
+    ).toBe(true));
+
+  it("does NOT catch a human asking about a price (one label, no colon format)", () =>
+    expect(isBanterNoise("what is the price of BTC today?")).toBe(false));
+
+  it("does NOT catch a human mentioning market cap casually", () =>
+    expect(
+      isBanterNoise("bitcoin market cap is huge now, is it safe to buy on Quidax?"),
+    ).toBe(false));
+});

@@ -15,6 +15,10 @@
 //   1b. Pasted news / external promo             long, third-person, no "?"
 //       no first-person pronoun, no Quidax/account/transaction keyword
 //   1c. User-to-user chatter — DEFERRED (false-positive risk too high)
+//   1d. Automated price-bot ticker dump          machine market snapshot,
+//       two+ of the distinctive "Price: $…", "Fully Diluted Market Cap",
+//       "View on CoinMarketCap"… labels (added 2026-06-20 after a tokenxoff.xyz
+//       shill came back through reconciliation as an Open ticket)
 
 // 1a — bare price/chart bot command: /p BTC, /price eth, /c SOL, /chart xrp
 // The whole trimmed text must be just the slash-command + an optional ticker.
@@ -43,12 +47,29 @@ const NEWS_PROPER_NOUN_RE =
 const NEWS_KEYWORD_RE =
   /^(?:breaking|report|update|alert|news|source)s?\s*[:\-]/i;
 
+// 1d — automated price-bot ticker dump. These are machine-generated market
+// snapshots ("Bitcoin X (tokenxoff.xyz)\nPrice: $… USD\n… Fully Diluted Market
+// Cap … View on CoinMarketCap"), never a support issue. Require TWO of these
+// distinctive labels so a human casually mentioning a price stays safe.
+const PRICE_BOT_LABELS: RegExp[] = [
+  /\bprice:\s*\$?\d/i,
+  /\bfully diluted market cap\b/i,
+  /\bview on coinmarketcap\b/i,
+  /\b24\s?hr?\s+change\b/i,
+  /\b7d\s+change\b/i,
+  /\btotal supply\b/i,
+  /\bmarket cap:\s*\$?\d/i,
+];
+
 export function isBanterNoise(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
 
   // 1a — bare price/chart bot command
   if (PRICE_CMD_RE.test(trimmed)) return true;
+
+  // 1d — automated price-bot ticker dump (two+ machine market-data labels)
+  if (PRICE_BOT_LABELS.filter((re) => re.test(trimmed)).length >= 2) return true;
 
   // 1b — pasted news / external promo
   const words = trimmed.split(/\s+/);
