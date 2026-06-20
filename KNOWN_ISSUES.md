@@ -4,7 +4,7 @@ This document provides a brutally honest, exhaustive tracking of every bug, susp
 
 ## ✅ KPI & WORKFLOW AUDIT — COMPLETE (read-only, 2026-06-19); IMPLEMENTATION QUEUED, decisions LOCKED
 
-**Status: Phases 1, 2 & 3 SHIPPED (Phase 2 sweep dormant pending a Railway enable). The 4 product decisions are signed off by the user. Start the next session at Phase 4 (noise pre-filter hardening) of the plan below.**
+**Status: ALL SHIPPED & LIVE. Phases 1–4 done; the 2026-06-20 manual-audit follow-up (Phases A–D2) is also done & verified in production — see the top banner of `PULSEDESK_HANDOFF.md`. Phase 2 (`Assumed Resolved` 7-day sweep) is ENABLED (`ASSUMED_RESOLVE_ENABLED=true`), and Phase D2 (conversation-aware resolution inference, `RESOLUTION_INFER_ENABLED=true`/`DRY_RUN=false`) is live. Resolution rate moved 16% (audit start) → 38.4%. The 4 product decisions remain locked.**
 
 All numbers reconciled against live SQL on `dovgochitqpuvmneqeqz` (786 tickets):
 `Dismissed 500 · In Review 139 · Open 100 · Resolved 46 · Awaiting User 1` → Active 240 → **Resolution Rate = 46/(46+240) = 16%** (30-day dashboard view = 33/219 = 15%). The dashboard math is FAITHFUL (`server.ts:3407`) — the low number is real given current bucketing, NOT an arithmetic bug.
