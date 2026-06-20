@@ -885,10 +885,20 @@ export default function App() {
     const parts = [];
     if (filterCategory !== "All") parts.push(filterCategory);
     else if (urgencyFilter !== "All") parts.push(urgencyFilter);
-    
+
     if (parts.length > 0) return `${parts.join(" ")} ${baseTitle}`;
     return baseTitle;
   };
+
+  const KPI_TOOLTIPS: Record<string, string> = {
+    "Active Issues": "Tickets that still need attention — Open, In Review, Escalated, and Awaiting User combined. Noise categories (General Question, Praise, Spam, Irrelevant) are excluded.",
+    "In Review": "Tickets where an admin has replied but the issue isn't closed yet. Also includes Escalated and Awaiting User tickets. A new user reply on an Awaiting User ticket moves it back to In Review.",
+    "Resolved": "Tickets closed as Resolved or Assumed Resolved in this period. Assumed Resolved = no new activity for 7+ days after an admin reply.",
+    "Resolution Rate": "Resolved ÷ (Resolved + Active). Dismissed tickets are not counted — they are noise/spam, not unresolved issues.",
+    "Median Response Time": "Median time from ticket creation to the first admin reply. Uses the median rather than the mean to avoid outliers distorting the figure.",
+  };
+
+  const getKpiTooltip = (key: string): string => KPI_TOOLTIPS[key] ?? key;
 
   // -- Chart Data -------------------------------------------------------------
   let maxDays = filterDays === "All" ? 30 : filterDays === "Custom" ? 30 : parseInt(filterDays);
@@ -922,7 +932,7 @@ export default function App() {
   // RENDER: Dashboard
   // -------------------------------------------------------------------------
   return (
-    <div className="min-h-screen bg-[#05070a] text-white font-sans overflow-auto flex flex-col relative pb-12 transform-gpu">
+    <div className="min-h-screen bg-[#05070a] text-white font-sans flex flex-col relative pb-12 transform-gpu">
       {/* Toast Notification */}
       <div className={`fixed top-4 right-4 z-50 transform transition-all duration-300 ${notification.visible ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"}`}>
         <div className={`flex items-center space-x-3 px-4 py-3 rounded-lg shadow-2xl backdrop-blur-md border ${notification.type === "success" ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-indigo-500/10 border-indigo-500/20 text-indigo-400"}`}>
@@ -1176,7 +1186,7 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 sm:gap-6">
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTitle("Active Issues")}>
+                <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTooltip("Active Issues")}>
                   {getKpiTitle("Active Issues")}
                 </p>
                 <AlertTriangle className={`w-5 h-5 shrink-0 ml-2 ${activeCount > 0 ? "text-rose-500" : "text-rose-500/40"}`} />
@@ -1187,7 +1197,7 @@ export default function App() {
             </div>
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold truncate" title={getKpiTitle("In Review")}>
+                <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold truncate" title={getKpiTooltip("In Review")}>
                   {getKpiTitle("In Review")}
                 </p>
               </div>
@@ -1200,7 +1210,7 @@ export default function App() {
             </div>
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold truncate" title={getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}>
+                <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold truncate" title={getKpiTooltip("Resolved")}>
                   {getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}
                 </p>
               </div>
@@ -1216,7 +1226,7 @@ export default function App() {
               )}
             </div>
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
-              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold">Resolution Rate</p>
+              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold" title={getKpiTooltip("Resolution Rate")}>Resolution Rate</p>
               <div className="flex items-end justify-between w-full">
                 <span className="text-4xl font-bold">{resolutionRate}%</span>
                 <div className="w-24 h-2 bg-white/10 rounded-full mb-2">
@@ -1225,7 +1235,7 @@ export default function App() {
               </div>
             </div>
             <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
-              <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTitle("Median Response Time")}>
+              <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTooltip("Median Response Time")}>
                 {getKpiTitle("Median Response Time")}
               </p>
               <div className="flex items-end justify-between w-full">
@@ -1271,7 +1281,7 @@ export default function App() {
                                 <Cell fill="#10b981" />
                                 <Cell fill="#6366f1" />
                               </Pie>
-                              <Tooltip formatter={(value: number) => [`${value} tickets`, "Count"]} contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff", fontSize: "12px" }} />
+                              <Tooltip formatter={(value: number, _: string, props: any) => [`${value} tickets`, props?.payload?.name || ""]} contentStyle={{ borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)", backgroundColor: "rgba(5, 7, 10, 0.8)", backdropFilter: "blur(12px)", color: "#fff", fontSize: "12px" }} />
                             </PieChart>
                           </ResponsiveContainer>
                         </div>
