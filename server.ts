@@ -3465,6 +3465,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       let query = supabase
         .from("tickets")
         .select("*", { count: "exact" })
+        .order("last_message_at", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false })
         .range(from, to);
       // All date boundaries are Lagos calendar days (UTC+1, no DST), matching
