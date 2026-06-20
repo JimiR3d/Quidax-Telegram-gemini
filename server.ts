@@ -61,6 +61,10 @@ import {
   ASSUME_RESOLVABLE_STATUSES,
   ASSUMED_RESOLVED_QUIET_DAYS,
 } from "./assumed-resolved";
+import {
+  buildResolutionMessages,
+  parseResolutionDecision,
+} from "./conversation-resolution";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -1186,6 +1190,173 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
   }
   setTimeout(assumeResolveQuietTickets, 3 * 60 * 1e3);
   setInterval(assumeResolveQuietTickets, 60 * 60 * 1e3);
+
+  // Phase D2 — conversation-aware resolution inference (KPI audit, 2026-06-20).
+  // The 7-day time sweep above is blunt: an admin can fully solve a ticket and it
+  // still sits "In Review" for a week (every admin reply resets the quiet clock).
+  // This sweep reads the WHOLE thread and, for an admin-engaged ticket quiet for
+  // a SHORT window (~24h), asks Groq "did support resolve the user's issue?". If
+  // yes, it moves to the same auditable "Assumed Resolved" status (reversible; a
+  // new user message reopens it). The verdict is STRICT-true and EVERY failure
+  // path (parse/error/breaker-open/timeout) leaves the ticket untouched, so a
+  // live issue is never wrongly closed and a Groq outage degrades to the pure
+  // time sweep. The pure module conversation-resolution.ts owns the prompt +
+  // verdict; the DB write is the same GUARDED conditional update as the time
+  // sweep so a concurrent human/ingestion change is never clobbered.
+  //
+  // Two fail-safe flags (default dormant), mirroring the outbound-bot rails:
+  //   RESOLUTION_INFER_ENABLED  default OFF — master switch.
+  //   RESOLUTION_INFER_DRY_RUN  default ON  — when on, the sweep still runs the
+  //     Groq calls and LOGS each would-resolve verdict but writes NOTHING, so the
+  //     backlog can be previewed in prod logs before any status is auto-changed.
+  // Go live by setting ENABLED=true AND DRY_RUN=false.
+  const RESOLUTION_INFER_ENABLED =
+    process.env.RESOLUTION_INFER_ENABLED === "true";
+  const RESOLUTION_INFER_DRY_RUN =
+    process.env.RESOLUTION_INFER_DRY_RUN !== "false";
+  const RESOLUTION_INFER_QUIET_HOURS =
+    Number(process.env.RESOLUTION_INFER_QUIET_HOURS) || 24;
+  // Cap the Groq calls per sweep (each is a real free-tier request, spaced 2.1s).
+  // The interval re-runs hourly, so a cap simply spreads a one-time backlog.
+  const RESOLUTION_INFER_SWEEP_LIMIT = 40;
+  async function inferResolvedFromConversation() {
+    try {
+      if (!RESOLUTION_INFER_ENABLED) return;
+      const supabase = getSupabase();
+      const { data: rows, error } = await supabase
+        .from("tickets")
+        .select(
+          "id, status, raw_text, first_admin_reply_at, last_message_at, created_at",
+        )
+        // Same eligibility spine as the time sweep: active, non-Escalated,
+        // non-admin, real (non-noise) category. Escalated is excluded by
+        // ASSUME_RESOLVABLE_STATUSES (a human parked it).
+        .in("status", ASSUME_RESOLVABLE_STATUSES)
+        .eq("is_admin_message", false)
+        .not(
+          "category",
+          "in",
+          '("General Question","Praise","Spam/Irrelevant")',
+        )
+        .order("last_message_at", { ascending: true, nullsFirst: true })
+        .limit(500);
+      if (error) {
+        logger.warn("ResolutionInfer", "Sweep query failed", {
+          error: error.message,
+        });
+        return;
+      }
+      if (!rows || rows.length === 0) return;
+      const now = Date.now();
+      const quietMs = RESOLUTION_INFER_QUIET_HOURS * 60 * 60 * 1e3;
+      let checked = 0;
+      let resolved = 0;
+      for (const t of rows) {
+        if (checked >= RESOLUTION_INFER_SWEEP_LIMIT) break;
+        // A conversation can only be "resolved by support" if support replied at
+        // least once: an [ADMIN_REPLY] block (reliable on legacy tickets) OR the
+        // first_admin_reply_at column (newer reply-attach paths).
+        const adminEngaged =
+          (typeof t.raw_text === "string" &&
+            t.raw_text.includes("[ADMIN_REPLY]")) ||
+          t.first_admin_reply_at != null;
+        if (!adminEngaged) continue;
+        const lastActivityMs = new Date(
+          t.last_message_at ?? t.created_at,
+        ).getTime();
+        if (
+          !Number.isFinite(lastActivityMs) ||
+          now - lastActivityMs < quietMs
+        ) {
+          continue;
+        }
+        // Eligible — spend a (rate-limited) Groq call. Space free-tier calls.
+        if (checked > 0) await new Promise((r) => setTimeout(r, 2100));
+        checked++;
+        let verdictResolved = false;
+        try {
+          // raw_text IS the full thread (original message + labeled
+          // [ADMIN_REPLY]/[USER_FOLLOWUP] blocks). PII-redact before the call.
+          const thread = redactPII(sanitizeForPrompt(String(t.raw_text ?? "")));
+          const messages = buildResolutionMessages(thread);
+          const response = await groqBreaker.call(() =>
+            withTimeout(
+              openai.chat.completions.create({
+                model: "llama-3.1-8b-instant",
+                temperature: 0,
+                messages,
+                response_format: { type: "json_object" },
+              }),
+              15e3,
+              "Groq resolution-inference",
+            ),
+          );
+          const jsonStr =
+            response.choices[0]?.message?.content?.trim() || "{}";
+          verdictResolved = parseResolutionDecision(jsonStr).resolved;
+        } catch (e) {
+          // Fail-safe: any breaker-open / timeout / parse error leaves the
+          // ticket untouched (never close a live issue on an LLM hiccup).
+          logger.warn(
+            "ResolutionInfer",
+            `Groq check failed for ${t.id} - leaving ticket open`,
+            { error: e?.message },
+          );
+          continue;
+        }
+        if (!verdictResolved) continue;
+        if (RESOLUTION_INFER_DRY_RUN) {
+          logger.info(
+            "ResolutionInfer",
+            `[DRY] would infer-resolve ticket ${t.id} (status ${t.status}) from conversation`,
+          );
+          resolved++;
+          continue;
+        }
+        const nowISO = new Date().toISOString();
+        const { error: updErr, count } = await supabase
+          .from("tickets")
+          .update(
+            {
+              status: "Assumed Resolved",
+              resolved_at: nowISO,
+              updated_at: nowISO,
+            },
+            { count: "exact" },
+          )
+          .eq("id", t.id)
+          // Guard: only flip if still in an eligible state (no clobber of a
+          // concurrent human/ingestion change between the read and this write).
+          .in("status", ASSUME_RESOLVABLE_STATUSES);
+        if (updErr) {
+          logger.warn(
+            "ResolutionInfer",
+            `Failed to infer-resolve ${t.id}`,
+            { error: updErr.message },
+          );
+          continue;
+        }
+        if (count && count > 0) {
+          resolved++;
+          logger.info(
+            "ResolutionInfer",
+            `Inferred-resolved ticket ${t.id} from conversation`,
+          );
+        }
+      }
+      if (resolved > 0) {
+        logger.info(
+          "ResolutionInfer",
+          `${RESOLUTION_INFER_DRY_RUN ? "[DRY] " : ""}Inferred-resolved ${resolved} admin-engaged ticket(s) via conversation (quiet >= ${RESOLUTION_INFER_QUIET_HOURS}h, ${checked} checked)`,
+        );
+      }
+    } catch (e) {
+      logger.warn("ResolutionInfer", "Sweep failed", { error: e.message });
+    }
+  }
+  setTimeout(inferResolvedFromConversation, 4 * 60 * 1e3);
+  setInterval(inferResolvedFromConversation, 60 * 60 * 1e3);
+
   const GROQ_SCHEMA = {
     type: "json_schema",
     json_schema: {
