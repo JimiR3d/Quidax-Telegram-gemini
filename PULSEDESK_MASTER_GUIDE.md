@@ -416,7 +416,7 @@ Knowing your users lets you answer "who is this for?" instantly — and explains
 
 Walk through these as "the feature set":
 
-1. **Listens to the whole group, live.** It connects to Telegram as a real user account (not a limited bot) so it can read every message in the community. Ingestion runs on two parallel paths for reliability (covered in Part 3 and Part 5).
+1. **Listens to the whole group, live.** It connects to Telegram as a real user account (not a limited bot) so it can read every message in the community. Ingestion runs on multiple overlapping paths for reliability — a 15-second live pull, a 3-minute safety-net sweep, manual backfill, and a self-healing reconciliation sweep — all funnelling into one idempotent function. (Covered in Part 3 and Part 5.)
 
 2. **Filters out noise before spending money on AI.** Obvious spam, greetings, and chatter are dropped by cheap rule checks *before* any AI is called, so the dashboard only fills with potential real issues and AI costs stay low.
 
@@ -434,7 +434,9 @@ Walk through these as "the feature set":
 
 9. **Learns from how admins reply.** If an admin answers a user in the group in a way that implies a different category — or clearly resolves the issue — the system quietly updates the ticket and records what it learned, without anyone opening a separate screen.
 
-10. **(Built, currently parked) Notifies users automatically.** Marking a ticket Resolved/Escalated/Awaiting-User can post an empathetic reply to the user in Telegram. This is fully built behind safety switches but can't go live because the Quidax group only allows admins to post (see Part 5 / Part 7) — a permission limitation, not a code problem.
+10. **Self-heals when messages are orphaned.** A background sweep periodically finds `messages` rows that have no corresponding ticket — caused by a crash or transient error mid-build — and replays them automatically through the normal pipeline. This means a transient error can never permanently hide a user's issue. A dry-run preview runs before any writes, and the full suite of noise filters runs inside the sweep, so bot templates and chatter are never resurrected as fake tickets.
+
+11. **(Built, currently parked) Notifies users automatically.** Marking a ticket Resolved/Escalated/Awaiting-User can post an empathetic reply to the user in Telegram. This is fully built behind safety switches but can't go live because the Quidax group only allows admins to post (see Part 5 / Part 7) — a permission limitation, not a code problem.
 
 ---
 
@@ -556,7 +558,7 @@ This is the single most valuable thing to be able to narrate. Walk it slowly.
 **A user types in the Quidax group:** *"abeg my withdrawal never enter since morning, wetin dey happen"* (Pidgin: "please my withdrawal hasn't arrived since morning, what's going on").
 
 **Step 1 — Ingestion (the message reaches the backend).**
-The backend is connected to Telegram as a user-client. It learns about the new message through its primary live path (a 15-second poll using a Telegram mechanism called `getChannelDifference`), with a slower 3-minute "AutoFetch" sweep running in parallel as a safety net. (*Why two paths? A long saga — the short version: the obvious "live push" method silently doesn't work for this kind of group in the library version used, so the system actively pulls instead. Full story in Part 7.*) Either way, every new message lands in one shared processing function.
+The backend is connected to Telegram as a user-client. It learns about the new message through its primary live path (a 15-second poll using a Telegram mechanism called `getChannelDifference`), with a slower 3-minute "AutoFetch" sweep running in parallel as a safety net. (*Why two paths? A long saga — the short version: the obvious "live push" method silently doesn't work for this kind of group in the library version used, so the system actively pulls instead. Full story in Part 7.*) There are also paths for manual backfill, recovery of quoted parent messages, and a **background reconciliation sweep** that finds any `messages` rows that ended up without a ticket (due to a mid-build crash) and replays them — a self-healing mechanism that means a transient error can never permanently hide a user's issue. Either way, every path funnels into one shared processing function.
 
 **Step 2 — Deduplication (idempotency).**
 The very first thing that function does is check: *have I already processed this exact message?* Every message has a unique Telegram ID; if it's been seen, the function stops immediately. This is what makes it safe for two ingestion paths (and re-runs) to overlap without ever creating duplicate tickets. (Part 1.15: idempotent.) This check is *first*, before anything is written or any AI is called — a deliberate and important ordering.
@@ -612,6 +614,8 @@ Be ready to defend each of these:
 - **"Pure modules" for the trickiest logic.** The hardest decisions (is this message in our group? should this ticket auto-resolve? how do we group a user's follow-up messages?) are pulled out into small, self-contained files that take inputs and return outputs with no side effects. This makes them **testable in isolation** without a live Telegram connection — which is exactly how they were verified. This pattern is one of the project's best decisions and recurs throughout. (More in Part 4 and Part 5.)
 
 - **Exactly one running backend instance.** Two instances would open two Telegram connections and double-process everything — and worse, can permanently break the Telegram login. The system is pinned to a single instance for this reason. (The dramatic version is a bug story in Part 7.)
+
+- **Self-healing orphan recovery.** The pipeline writes the `messages` row before the ticket. Any crash between those two steps permanently hides the message from all future dedup scans — unless a background sweep looks for `messages` rows with no matching ticket and replays them. This is the reconciliation sweep: a structural answer to a structural data-ordering problem, not a manual cleanup. (Full story in Part 5.11 and Part 7.)
 
 - **Evidence-based verification as a practice.** Every fix was proven with a test, a live request, a database query, or production logs — and when something could only be verified in production, that was stated honestly rather than hidden. This isn't a "technology" choice, but it's an engineering-culture choice worth naming.
 
@@ -730,6 +734,8 @@ These small files in the root each own **one tricky decision**, written as pure 
 | `deploy-overlap.ts` | The startup delay that prevents two instances overlapping during a deploy |
 | `pidgin-glossary.ts` | The Nigerian Pidgin knowledge injected into the AI's instructions |
 | `benchmark-cases.ts` | The fixed, hand-labelled gold test cases for measuring AI accuracy |
+| `message-reconciliation.ts` | Deciding which orphaned `messages` rows are genuine user issues worth replaying (vs. bot/system noise) |
+| `handoff-detect.ts` | Detecting when an admin directed a user to DMs or email — so those tickets show a "Handed Off" badge instead of sitting forever as unresolved |
 
 **Why this pattern matters (say this):** the live Telegram connection can't run on a laptop safely while production is live, so the riskiest logic was deliberately made *not* depend on Telegram — pure inputs and outputs — so it could be unit-tested exhaustively offline. That's how decisions this sensitive were verified without touching production.
 
@@ -743,7 +749,7 @@ These small files in the root each own **one tricky decision**, written as pure 
 
 ## 4.7 `tests/`
 
-Fifteen automated test files (~1,600 lines) that check the pure modules behave correctly across every case — normal inputs, weird inputs, and edge cases. Running them (`npm test`) gives a fast, trustworthy "did I break anything?" signal. The current suite is **172 tests**. In an interview: *"the tests target the pure modules, which is where the subtle logic lives; that's a deliberate, high-value place to concentrate testing."*
+Twenty-one automated test files that check the pure modules behave correctly across every case — normal inputs, weird inputs, and edge cases. Running them (`npm test`) gives a fast, trustworthy "did I break anything?" signal. The current suite is **273 tests**. In an interview: *"the tests target the pure modules, which is where the subtle logic lives; that's a deliberate, high-value place to concentrate testing."*
 
 ---
 
@@ -809,11 +815,12 @@ The subsystems:
 
 **The job:** every message in the Quidax group must reach the backend and be processed exactly once, no matter how it arrives.
 
-**The challenge:** there are *four* different ways a message can enter the system, and they overlap on purpose for reliability:
+**The challenge:** there are *five* different ways a message can enter the system, and they overlap on purpose for reliability:
 1. **The live path** — a 15-second poll (`getChannelDifference`, see 5.2) that catches messages within seconds. This is the primary path.
 2. **AutoFetch** — a slower sweep every 3 minutes that re-reads recent history as a safety net, in case the live path missed something.
 3. **Backfill** — a manual tool to pull in older history on demand.
 4. **Recovery of quoted parents** — when an admin replies to a user message the system never saw, it fetches and ingests that original first.
+5. **Reconciliation sweep** — a background job that periodically finds messages in the `messages` table that have no corresponding ticket (because a crash or transient error orphaned them mid-build) and replays them through the normal pipeline. (See 5.11.)
 
 **Why overlap is safe — the single most important reliability idea in the project:** every one of those paths funnels into *one shared function*, and the very first thing that function does is check **"have I already processed this exact message?"** using the message's unique Telegram ID. If yes, it stops immediately. This makes the whole pipeline **idempotent** — running it twice (or four times) on the same message produces exactly one ticket.
 
@@ -823,7 +830,7 @@ Two layers of defense back this up:
 
 **The ordering rule that must never change:** the dedup check sits *at the very top*, before any database write, any AI call, or any reply-handling branch. An earlier version of the project had this check *lower down*, after the reply-handling logic — which caused admin/user replies to be appended to tickets again on every sweep (one ticket showed a reply duplicated 23 times). Moving the check to the top fixed it permanently. (Full story in Part 7.)
 
-> **The point to make:** "Four ingestion paths overlap for reliability, and that's only safe because processing is idempotent — a dedup check on the Telegram message ID runs first, backed by a unique database constraint. Re-processing is a no-op."
+> **The point to make:** "Five ingestion paths overlap for reliability, and that's only safe because processing is idempotent — a dedup check on the Telegram message ID runs first, backed by a unique database constraint. Re-processing is a no-op."
 
 ---
 
@@ -858,7 +865,7 @@ A subtlety handled carefully: one of Telegram's possible answers ("too much has 
 - The raw output is cleaned (stripping any stray formatting), parsed as JSON, common mislabels are normalized (e.g. if the model says `priority` instead of `urgency`), and then validated against the allowed shape.
 - If the model returns something malformed, the system retries a couple of times and then **falls back safely** — it still creates the ticket, flagged as degraded, rather than crashing or silently inventing a wrong label. *The user's message is never lost because the AI had a bad moment.* (Graceful degradation, Part 1.15.)
 
-**Noise gating happens first:** cheap rules drop spam/greetings/chatter *before* the AI is called, so money isn't spent classifying "gm." Praise and irrelevant messages don't become tickets.
+**Noise gating happens first:** cheap rules drop spam/greetings/chatter *before* the AI is called, so money isn't spent classifying "gm." Praise and irrelevant messages don't become tickets. There is also a set of pattern-based pre-filters (`noise-prefilter.ts`) that route specific noise shapes straight to Dismissed without an AI call: bare price-bot commands like `/p BTC` or `/chart SOL` (pattern 1a), and long pasted news or promotional text (pattern 1b). Pattern 1d (added alongside the reconciliation work) extends this to automated token price-snapshot dumps — the multi-line "Price: $X USD / Fully Diluted Market Cap / View on CoinMarketCap" blasts that certain group bots post. All of these correctly route to Dismissed (reversible in `/train`); the `messages` row is always kept.
 
 **Nigerian Pidgin coverage (a standout feature):** the AI's instructions include a **Pidgin glossary** — common phrases mapped to their real meaning and the right category, plus worked examples. So *"money never enter"* is understood as a deposit problem, not filed under "General Question," and *"una too much"* is recognized as praise, not a complaint. This is built into the base instructions (so it improves both the live system and the accuracy benchmark equally), rather than relying on stored corrections. The measured result: Pidgin classification accuracy went from ~67% to 100% on the Pidgin test cases.
 
@@ -907,6 +914,8 @@ This is the embodiment of the core philosophy (Part 2.7). Three connected pieces
 **The solution:** when a user sends several un-quoted messages in a short rolling window (default 5 minutes), the follow-ups are **folded into the same ticket** as additional blocks, and the ticket is **re-classified on the whole thread** rather than a single fragment. So the classifier and the human reviewer both see the complete issue.
 
 **Careful boundaries (why it's safe):** grouping only happens for a fresh, un-quoted, non-admin message from the same sender within the window; it groups into that sender's most-recently-active ticket; and the re-classification updates the labels and summary **but never the status** — because a human (or an admin's reply) owns the status, and an automatic process shouldn't override that. The window-tracking timestamp is updated on every message in the thread so the "is this within the window?" decision stays accurate across back-and-forth. (Pure module `conversation-grouping.ts`.)
+
+**The quoted-reply fallback (and why it has a time limit):** when a user sends a message that quotes another, the system tries to find that quoted parent as an active ticket to attach the reply to. If no active ticket is found, a fallback looks up the sender's most-recently-active ticket. An earlier version of this fallback had no age limit — so a user quoting anything could end up attaching their message to a ticket created weeks ago. The fallback is now bounded to tickets whose last activity was within 48 hours (`QUOTED_FALLBACK_MAX_AGE_MS`), most-recently-active first. Past that window, the message falls through to the normal grouping or new-ticket path instead.
 
 > **The point to make:** "Users send issues across several quick messages, so consecutive messages from the same person within a 5-minute window are folded into one ticket and the AI re-reads the whole thread — but grouping never changes status, because humans own status."
 
@@ -980,6 +989,31 @@ A handful of operational features keep the system alive and uncorrupted. These s
 **Session rotation.** The Telegram login credential ("session string") has had to be regenerated a few times (once when it was externally revoked, once after the rolling-deploy burn). This is a known, documented operational procedure — done only with explicit instruction, since it's effectively re-doing the login.
 
 > **The point to make:** "Running it reliably meant: a watchdog that only trusts real group traffic as a sign of life; pinning to a single instance; and specifically preventing two instances from overlapping during a deploy, because two simultaneous Telegram logins permanently burn the credential — solved with a graceful disconnect on shutdown plus a 60-second connect delay on startup."
+
+---
+
+## 5.11 The reconciliation sweep — recovering orphaned messages
+
+**The problem it solves:** the ingestion pipeline always writes the `messages` row *first*, then builds the ticket. The deduplication key sits on that `messages` row, so a crash or transient error mid-build (after the row lands but before the ticket is created) **permanently orphans the message** — every later re-scan sees it as already-processed and skips it, so no ticket is ever created. The user's issue simply vanishes. This is especially painful when a burst of related messages arrives: the first one gets a ticket, a later crash silently kills the others, and the user's follow-ups or admin replies have nowhere to attach.
+
+**Why it went undetected:** from the outside the pipeline looks healthy — the message is in the database, and no error appears for it on any future pass. The only sign is a `messages` row with no matching ticket.
+
+**The fix — a self-healing sweep (`reconcileOrphanMessages`):**
+A background job runs at startup (after 5 minutes) and then hourly. It queries for `messages` rows that have no matching ticket, filters out noise (system bot templates, chatter, price commands), and replays each one through the *same* `processAndIngestMessage` function the live pipeline uses — with a 3-line bypass that reuses the existing `messages.id` and preserves the sender hash (so a multi-message conversation re-groups correctly rather than creating disconnected tickets). The top-of-function dedup is still the authoritative idempotency guard; the sweep just unlocks messages that were previously unreachable.
+
+**The tricky guard — no `checkIsAdmin` in the sweep.** The live pipeline identifies admins by their Telegram `senderId`. But the `messages` table only stores a hashed sender ID, not the raw Telegram one. Dropped admin messages (unattached admin replies, correctly discarded by `admin-message-policy.ts`) are never turned into tickets, so their hashes are absent from any admin reference set. The result: welcome messages and ban-notification bots would look like ordinary users to the sweep and come back as genuine support tickets. Fix: a content-pattern recognizer `isSystemBotMessage()` catches unmistakable system message templates (welcome, ban notices), and the same `shouldProcessMessage` / `isBanterNoise` noise gate that protects the live pipeline runs here too — so only messages that would have passed the original filter can be resurrected.
+
+**The dry-run preview** is what caught this class of false-orphan before a single row was written. A read-only preview script queried for orphan candidates and returned the exact set that would be replayed — system bot messages and all. That preview is what proved the `isSystemBotMessage` guard was necessary.
+
+**Gating (ships safely off by default):** `INGEST_RECONCILE_ENABLED` (default OFF) and `INGEST_RECONCILE_DRY_RUN` (default ON) mirror the bot-reply rails. The live system enables both (`ENABLED=true`, `DRY_RUN=false`) on Railway. Re-running the sweep converges to 0 orphans because the dedup ensures each message is only ever built into a ticket once.
+
+**Phase 0 — the dashboard side of the story.** Before the reconciliation engine, the *display* layer also needed updates so recovered tickets would look right and agents would understand what they were seeing. Phase 0 added:
+- **"Admin Replied" / "Likely Resolved" / "Handed Off" labels** — display-only status relabels that make the ticket state legible without changing any stored value. A new pure module `handoff-detect.ts` detects DM/email redirect language in the raw thread and drives the "Handed Off" badge.
+- **Rendered `[USER_FOLLOWUP]` blocks** — recovered conversations show their full thread, not just the first message.
+- **Fixed the resolution pie** — the previous version had a mystery gray slice from floating-point rounding; replaced with 3 explicit cells and a correct legend.
+- **iOS scroll-shake fix** — an overflow layout and blob blur stacking on `min-h-screen` containers caused mobile scroll jitter; fixed with `min-h-[100dvh]`, `transform-gpu`, and `absolute` positioning for the decorative layers.
+
+> **The point to make:** "The root cause of lost messages wasn't the ingestion pipeline failing loudly — it was a structural ordering: the `messages` row is written before the ticket, and the dedup key lives on that row. Any crash between the two permanently hides the message. The fix is a background sweep that finds those gaps and replays them through the same idempotent function, with a careful guard to avoid resurrecting bot messages that were correctly discarded."
 
 ---
 
@@ -1293,7 +1327,38 @@ Why both? The delay alone fails if the old copy is slow to shut down; the gracef
 
 ---
 
-## 7.10 How to tell any of these in an interview (the formula)
+## 7.10 Messages that arrived before their ticket existed (the orphan problem)
+
+**Situation.** Users were reporting that entire conversations — sometimes the most important ones of the day — were completely missing from the dashboard. The support team's morning session had produced nothing visible: no ticket, no thread, no trace. Yet the agents had definitely been active in the group.
+
+**Why it mattered.** The tool's job is to surface every real issue. "Sometimes conversations disappear entirely" is a trust-destroying failure, and even more so when the missing conversation turns out to be an urgent account-access case with the admin actively engaged.
+
+**Investigation — finding where the message actually was.**
+The key move was to check the `messages` table directly, rather than starting from the tickets side. The messages *were* there — every one of them, with normal timestamps and no error flags. But there were no corresponding tickets. That asymmetry gave the real question: *why does a `messages` row exist without a ticket?*
+
+**Root cause — the ordering trap.**
+The ingestion pipeline writes the `messages` row first, then builds the ticket. The deduplication check keys on that `messages` row. So if anything throws between those two steps — a database timeout, a transient network error, even a classification hiccup — the message row lands, but the ticket is never created. Every future re-scan (live path, AutoFetch, backfill) hits the dedup check, sees the message as "already processed," and skips it immediately. **The message is permanently orphaned.** Not lost — it's in the database — but made permanently invisible to all ingestion paths.
+
+This structural ordering existed from the beginning. It was only visible as a bug when the rate of mid-build errors was high enough to accumulate orphans at a rate users noticed.
+
+**A second problem discovered in the same investigation.** Unrelated to the crash case: the non-admin quoted-reply branch had a silent `return null` for quotes that matched no active ticket. A user's real issue arriving as a reply to a welcome or old message would create no ticket at all, and admin replies to it would be dropped as "unattached admin" — the entire live conversation was invisible. Fix: remove the `return null` and fall through to the normal grouping/new-ticket logic. The top-of-function dedup still prevents any duplicates from the multiple re-scans.
+
+**The fix — a self-healing reconciliation sweep.**
+A background job (`reconcileOrphanMessages`) runs at startup and hourly. It finds `messages` rows with no matching ticket and replays each one through the *same* shared `processAndIngestMessage` function — bypassing only the `messages` insert step (the row already exists) via a 3-line `reconcileOpts` object. This preserves the sender hash (so a multi-message conversation re-groups into one ticket instead of creating orphan singletons) and keeps the dedup as the authoritative idempotency guard.
+
+**A guard discovered during the dry-run preview.**
+Before enabling the sweep for real, a read-only preview queried for orphan candidates. It surfaced welcome-message templates and ban-notification bot messages in the set. The live pipeline can identify admins and system accounts by their Telegram `senderId` — but the `messages` table stores only a hashed sender ID, so `checkIsAdmin` can't run inside the sweep. Without a guard, those system messages would have been resurrected as genuine tickets. Fix: a content-pattern recognizer (`isSystemBotMessage`) catches unmistakable system templates, and the same `shouldProcessMessage` / `isBanterNoise` gate that protects the live pipeline runs in the sweep too.
+
+*This is exactly why the dry-run mode exists: to make the real consequence of the sweep visible before anything is written.*
+
+**How it was proven — the morning conversation recovery.**
+The sweep was run against the live database with `INGEST_RECONCILE_ENABLED=true` and `DRY_RUN=false`. The three orphaned user messages from the morning account-access conversation (Telegram IDs 140062/063/064) folded into a single ticket `c4ba87be` (Account Access / High). The two admin replies (140065/140066) that had previously been dropped as "unattached admin" were re-attached to that ticket by sourcing their text from the stored `messages` rows — a recovered 3-user + 2-admin thread, now fully visible on the dashboard. A second run found **0 orphans remaining** — the sweep is idempotent. Deploy was healthy: no `AUTH_KEY_DUPLICATED`, all circuit breakers closed.
+
+**What it demonstrates.** Debugging by looking at the *structure* of the data (a `messages` row with no ticket) rather than the error logs; understanding that a correct-looking dedup is also what hides a structural ordering bug; the discipline of a dry-run preview before any write; and that recovering a specific live conversation from stored data — rather than re-fetching from Telegram (which would risk burning the session) — is the right, safe approach.
+
+---
+
+## 7.11 How to tell any of these in an interview (the formula)
 
 When asked "tell me about a hard bug," use this 60-second structure:
 
@@ -1497,6 +1562,8 @@ Log in.
 > "Here's the live feed. Every card is a real support issue the AI pulled out of the noise. Notice the urgency tags — this is the prioritization that means a stuck withdrawal doesn't get buried under 'good morning' messages."
 Open one ticket.
 > "Inside a ticket: the original message, the AI's category and urgency, a short summary, and a suggested reply the agent can tweak and send. The agent stays in control — nothing is sent automatically."
+Point at the status labels:
+> "Notice how the statuses are labelled for humans, not machines. 'Admin Replied' rather than 'In Review.' 'Likely Resolved' for the ones a time-based sweep auto-moved after 7 quiet days. And 'Handed Off' — that badge appears when the conversation shows the admin directed the user to email or DMs, so that ticket doesn't sit in the active queue counting against the team forever. All display-only; the stored value is unchanged."
 
 **Step 4 — Show the Nigerian Pidgin handling (a standout).**
 If you can find or describe a Pidgin example:
@@ -1520,7 +1587,7 @@ Then mention Verify:
 > "There's one more capability, fully built but currently switched off: when an agent resolves a ticket, the system can automatically post an empathetic update to the user in Telegram. It's behind a kill switch, a dry-run mode, send-once protection, and rate limits. It's parked only because the Quidax group is broadcast-only — admins-only posting — so it needs Quidax to grant posting rights. The moment they do, it's a one-setting change to go live."
 
 **Step 9 — Close with reliability (shows operational depth).**
-> "Behind all this is the boring-but-critical reliability work — it ingests messages within seconds even though the obvious live method silently didn't work for this group, it survives AI outages and quota limits gracefully, and it's hardened against the deployment race that can otherwise break the Telegram connection. I'm happy to go deep on any of that."
+> "Behind all this is the boring-but-critical reliability work — it ingests messages within seconds even though the obvious live method silently didn't work for this group, it survives AI outages and quota limits gracefully, and it's hardened against the deployment race that can otherwise break the Telegram connection. There's also a self-healing sweep that finds messages that landed in the database but never got a ticket — a class of silent data loss that's structurally invisible to the normal pipeline — and replays them automatically. I'm happy to go deep on any of that."
 
 ---
 
@@ -1700,6 +1767,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 
 **GramJS.** A JavaScript library for connecting to Telegram as a real *user* account (via MTProto), so it can read all group messages. *How PulseDesk listens to the Quidax group.*
 
+**`handoff-detect.ts`.** A pure module that reads the raw text of a ticket's thread and returns whether an admin directed the user to DMs or email — the "Handed Off" display badge is driven by this. It has no side effects, so it can be tested without a live session.
+
 **Graceful degradation.** Failing softly — e.g. still creating a ticket (flagged) even if the AI was down — so a user's message is never lost to a dependency hiccup.
 
 **Groq.** A very fast LLM provider. *PulseDesk uses it (running LLaMA) for classification.*
@@ -1724,6 +1793,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 
 **Migration.** A single, numbered, saved change to the database's structure, written in SQL. *PulseDesk's are in `supabase/migrations/`.*
 
+**`message-reconciliation.ts`.** A pure module that decides which orphaned `messages` rows are genuine user issues (worth replaying as tickets) vs. system bot templates (welcome messages, ban notices) that should stay silent. The key guard that keeps the reconciliation sweep safe.
+
 **MTProto.** Telegram's lower-level protocol that a real *user* account uses (as opposed to the limited Bot API). *PulseDesk connects via MTProto using GramJS.*
 
 **Node.js.** The thing that lets JavaScript run on a server (outside a browser). *PulseDesk's backend runs on Node.*
@@ -1731,6 +1802,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 **Noise gating.** Dropping spam, greetings, and chatter with cheap rules *before* spending money on an AI call.
 
 **npm (Node Package Manager).** The tool that downloads and manages reusable code packages.
+
+**Orphan message.** A `messages` row that has no corresponding ticket — created when the ingestion pipeline writes the message row first, then crashes before it can create the ticket. The dedup key sits on the `messages` row, so every future re-scan skips it as "already seen." The reconciliation sweep finds and replays these.
 
 **`package.json`.** The project's identity-and-dependencies file, listing packages and shortcut commands.
 
@@ -1748,6 +1821,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 
 **Pure module / pure function.** Logic that, given the same inputs, always returns the same output and touches nothing else (no database, no network) — making it easy to test in isolation. *PulseDesk's signature pattern; e.g. `conversation-grouping.ts`.*
 
+**Quoted-reply fallback.** When a user sends a message quoting another, and the system finds no active ticket for that quoted parent, it falls back to attaching the reply to the sender's most-recently-active ticket. The fallback is bounded to tickets with activity within the last 48 hours (`QUOTED_FALLBACK_MAX_AGE_MS`) — without this limit, a fresh message could accidentally attach to a month-old ticket.
+
 **Race condition.** A bug where two things happen at almost the same time and interfere — e.g. the AI overwriting a status a human just set. *PulseDesk guards against these with conditional "only update if unchanged" writes.*
 
 **Railway.** The cloud hosting service running PulseDesk's backend as a single always-on container.
@@ -1757,6 +1832,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 **React.** A library for building user interfaces from reusable **components**. *PulseDesk's dashboard is a React app.*
 
 **Redaction.** Removing sensitive data and replacing it with placeholders. *Applied to messages before any external AI call.*
+
+**Reconciliation sweep.** The background job (`reconcileOrphanMessages`) that finds orphaned `messages` rows (no ticket) and replays them through the normal ingestion pipeline. Runs hourly. Idempotent — re-running it converges to 0 orphans. Gated behind `INGEST_RECONCILE_ENABLED` / `INGEST_RECONCILE_DRY_RUN` flags so it can be previewed before any writes. The `message-reconciliation.ts` module handles the candidate-filtering logic.
 
 **REST.** A common style for designing APIs using HTTP methods sensibly (GET to read, POST to act).
 

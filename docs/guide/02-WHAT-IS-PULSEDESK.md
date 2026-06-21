@@ -53,7 +53,7 @@ Knowing your users lets you answer "who is this for?" instantly — and explains
 
 Walk through these as "the feature set":
 
-1. **Listens to the whole group, live.** It connects to Telegram as a real user account (not a limited bot) so it can read every message in the community. Ingestion runs on two parallel paths for reliability (covered in Part 3 and Part 5).
+1. **Listens to the whole group, live.** It connects to Telegram as a real user account (not a limited bot) so it can read every message in the community. Ingestion runs on multiple overlapping paths for reliability — a 15-second live pull, a 3-minute safety-net sweep, manual backfill, and a self-healing reconciliation sweep — all funnelling into one idempotent function. (Covered in Part 3 and Part 5.)
 
 2. **Filters out noise before spending money on AI.** Obvious spam, greetings, and chatter are dropped by cheap rule checks *before* any AI is called, so the dashboard only fills with potential real issues and AI costs stay low.
 
@@ -71,7 +71,9 @@ Walk through these as "the feature set":
 
 9. **Learns from how admins reply.** If an admin answers a user in the group in a way that implies a different category — or clearly resolves the issue — the system quietly updates the ticket and records what it learned, without anyone opening a separate screen.
 
-10. **(Built, currently parked) Notifies users automatically.** Marking a ticket Resolved/Escalated/Awaiting-User can post an empathetic reply to the user in Telegram. This is fully built behind safety switches but can't go live because the Quidax group only allows admins to post (see Part 5 / Part 7) — a permission limitation, not a code problem.
+10. **Self-heals when messages are orphaned.** A background sweep periodically finds `messages` rows that have no corresponding ticket — caused by a crash or transient error mid-build — and replays them automatically through the normal pipeline. This means a transient error can never permanently hide a user's issue. A dry-run preview runs before any writes, and the full suite of noise filters runs inside the sweep, so bot templates and chatter are never resurrected as fake tickets.
+
+11. **(Built, currently parked) Notifies users automatically.** Marking a ticket Resolved/Escalated/Awaiting-User can post an empathetic reply to the user in Telegram. This is fully built behind safety switches but can't go live because the Quidax group only allows admins to post (see Part 5 / Part 7) — a permission limitation, not a code problem.
 
 ---
 

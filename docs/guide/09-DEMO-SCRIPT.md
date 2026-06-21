@@ -40,6 +40,8 @@ Log in.
 > "Here's the live feed. Every card is a real support issue the AI pulled out of the noise. Notice the urgency tags — this is the prioritization that means a stuck withdrawal doesn't get buried under 'good morning' messages."
 Open one ticket.
 > "Inside a ticket: the original message, the AI's category and urgency, a short summary, and a suggested reply the agent can tweak and send. The agent stays in control — nothing is sent automatically."
+Point at the status labels:
+> "Notice how the statuses are labelled for humans, not machines. 'Admin Replied' rather than 'In Review.' 'Likely Resolved' for the ones a time-based sweep auto-moved after 7 quiet days. And 'Handed Off' — that badge appears when the conversation shows the admin directed the user to email or DMs, so that ticket doesn't sit in the active queue counting against the team forever. All display-only; the stored value is unchanged."
 
 **Step 4 — Show the Nigerian Pidgin handling (a standout).**
 If you can find or describe a Pidgin example:
@@ -63,7 +65,7 @@ Then mention Verify:
 > "There's one more capability, fully built but currently switched off: when an agent resolves a ticket, the system can automatically post an empathetic update to the user in Telegram. It's behind a kill switch, a dry-run mode, send-once protection, and rate limits. It's parked only because the Quidax group is broadcast-only — admins-only posting — so it needs Quidax to grant posting rights. The moment they do, it's a one-setting change to go live."
 
 **Step 9 — Close with reliability (shows operational depth).**
-> "Behind all this is the boring-but-critical reliability work — it ingests messages within seconds even though the obvious live method silently didn't work for this group, it survives AI outages and quota limits gracefully, and it's hardened against the deployment race that can otherwise break the Telegram connection. I'm happy to go deep on any of that."
+> "Behind all this is the boring-but-critical reliability work — it ingests messages within seconds even though the obvious live method silently didn't work for this group, it survives AI outages and quota limits gracefully, and it's hardened against the deployment race that can otherwise break the Telegram connection. There's also a self-healing sweep that finds messages that landed in the database but never got a ticket — a class of silent data loss that's structurally invisible to the normal pipeline — and replays them automatically. I'm happy to go deep on any of that."
 
 ---
 

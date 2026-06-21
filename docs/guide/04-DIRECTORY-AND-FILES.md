@@ -108,6 +108,8 @@ These small files in the root each own **one tricky decision**, written as pure 
 | `deploy-overlap.ts` | The startup delay that prevents two instances overlapping during a deploy |
 | `pidgin-glossary.ts` | The Nigerian Pidgin knowledge injected into the AI's instructions |
 | `benchmark-cases.ts` | The fixed, hand-labelled gold test cases for measuring AI accuracy |
+| `message-reconciliation.ts` | Deciding which orphaned `messages` rows are genuine user issues worth replaying (vs. bot/system noise) |
+| `handoff-detect.ts` | Detecting when an admin directed a user to DMs or email — so those tickets show a "Handed Off" badge instead of sitting forever as unresolved |
 
 **Why this pattern matters (say this):** the live Telegram connection can't run on a laptop safely while production is live, so the riskiest logic was deliberately made *not* depend on Telegram — pure inputs and outputs — so it could be unit-tested exhaustively offline. That's how decisions this sensitive were verified without touching production.
 
@@ -121,7 +123,7 @@ These small files in the root each own **one tricky decision**, written as pure 
 
 ## 4.7 `tests/`
 
-Fifteen automated test files (~1,600 lines) that check the pure modules behave correctly across every case — normal inputs, weird inputs, and edge cases. Running them (`npm test`) gives a fast, trustworthy "did I break anything?" signal. The current suite is **172 tests**. In an interview: *"the tests target the pure modules, which is where the subtle logic lives; that's a deliberate, high-value place to concentrate testing."*
+Twenty-one automated test files that check the pure modules behave correctly across every case — normal inputs, weird inputs, and edge cases. Running them (`npm test`) gives a fast, trustworthy "did I break anything?" signal. The current suite is **273 tests**. In an interview: *"the tests target the pure modules, which is where the subtle logic lives; that's a deliberate, high-value place to concentrate testing."*
 
 ---
 

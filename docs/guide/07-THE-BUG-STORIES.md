@@ -164,7 +164,38 @@ Why both? The delay alone fails if the old copy is slow to shut down; the gracef
 
 ---
 
-## 7.10 How to tell any of these in an interview (the formula)
+## 7.10 Messages that arrived before their ticket existed (the orphan problem)
+
+**Situation.** Users were reporting that entire conversations — sometimes the most important ones of the day — were completely missing from the dashboard. The support team's morning session had produced nothing visible: no ticket, no thread, no trace. Yet the agents had definitely been active in the group.
+
+**Why it mattered.** The tool's job is to surface every real issue. "Sometimes conversations disappear entirely" is a trust-destroying failure, and even more so when the missing conversation turns out to be an urgent account-access case with the admin actively engaged.
+
+**Investigation — finding where the message actually was.**
+The key move was to check the `messages` table directly, rather than starting from the tickets side. The messages *were* there — every one of them, with normal timestamps and no error flags. But there were no corresponding tickets. That asymmetry gave the real question: *why does a `messages` row exist without a ticket?*
+
+**Root cause — the ordering trap.**
+The ingestion pipeline writes the `messages` row first, then builds the ticket. The deduplication check keys on that `messages` row. So if anything throws between those two steps — a database timeout, a transient network error, even a classification hiccup — the message row lands, but the ticket is never created. Every future re-scan (live path, AutoFetch, backfill) hits the dedup check, sees the message as "already processed," and skips it immediately. **The message is permanently orphaned.** Not lost — it's in the database — but made permanently invisible to all ingestion paths.
+
+This structural ordering existed from the beginning. It was only visible as a bug when the rate of mid-build errors was high enough to accumulate orphans at a rate users noticed.
+
+**A second problem discovered in the same investigation.** Unrelated to the crash case: the non-admin quoted-reply branch had a silent `return null` for quotes that matched no active ticket. A user's real issue arriving as a reply to a welcome or old message would create no ticket at all, and admin replies to it would be dropped as "unattached admin" — the entire live conversation was invisible. Fix: remove the `return null` and fall through to the normal grouping/new-ticket logic. The top-of-function dedup still prevents any duplicates from the multiple re-scans.
+
+**The fix — a self-healing reconciliation sweep.**
+A background job (`reconcileOrphanMessages`) runs at startup and hourly. It finds `messages` rows with no matching ticket and replays each one through the *same* shared `processAndIngestMessage` function — bypassing only the `messages` insert step (the row already exists) via a 3-line `reconcileOpts` object. This preserves the sender hash (so a multi-message conversation re-groups into one ticket instead of creating orphan singletons) and keeps the dedup as the authoritative idempotency guard.
+
+**A guard discovered during the dry-run preview.**
+Before enabling the sweep for real, a read-only preview queried for orphan candidates. It surfaced welcome-message templates and ban-notification bot messages in the set. The live pipeline can identify admins and system accounts by their Telegram `senderId` — but the `messages` table stores only a hashed sender ID, so `checkIsAdmin` can't run inside the sweep. Without a guard, those system messages would have been resurrected as genuine tickets. Fix: a content-pattern recognizer (`isSystemBotMessage`) catches unmistakable system templates, and the same `shouldProcessMessage` / `isBanterNoise` gate that protects the live pipeline runs in the sweep too.
+
+*This is exactly why the dry-run mode exists: to make the real consequence of the sweep visible before anything is written.*
+
+**How it was proven — the morning conversation recovery.**
+The sweep was run against the live database with `INGEST_RECONCILE_ENABLED=true` and `DRY_RUN=false`. The three orphaned user messages from the morning account-access conversation (Telegram IDs 140062/063/064) folded into a single ticket `c4ba87be` (Account Access / High). The two admin replies (140065/140066) that had previously been dropped as "unattached admin" were re-attached to that ticket by sourcing their text from the stored `messages` rows — a recovered 3-user + 2-admin thread, now fully visible on the dashboard. A second run found **0 orphans remaining** — the sweep is idempotent. Deploy was healthy: no `AUTH_KEY_DUPLICATED`, all circuit breakers closed.
+
+**What it demonstrates.** Debugging by looking at the *structure* of the data (a `messages` row with no ticket) rather than the error logs; understanding that a correct-looking dedup is also what hides a structural ordering bug; the discipline of a dry-run preview before any write; and that recovering a specific live conversation from stored data — rather than re-fetching from Telegram (which would risk burning the session) — is the right, safe approach.
+
+---
+
+## 7.11 How to tell any of these in an interview (the formula)
 
 When asked "tell me about a hard bug," use this 60-second structure:
 

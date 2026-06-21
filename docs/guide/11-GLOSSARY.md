@@ -64,6 +64,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 
 **GramJS.** A JavaScript library for connecting to Telegram as a real *user* account (via MTProto), so it can read all group messages. *How PulseDesk listens to the Quidax group.*
 
+**`handoff-detect.ts`.** A pure module that reads the raw text of a ticket's thread and returns whether an admin directed the user to DMs or email — the "Handed Off" display badge is driven by this. It has no side effects, so it can be tested without a live session.
+
 **Graceful degradation.** Failing softly — e.g. still creating a ticket (flagged) even if the AI was down — so a user's message is never lost to a dependency hiccup.
 
 **Groq.** A very fast LLM provider. *PulseDesk uses it (running LLaMA) for classification.*
@@ -88,6 +90,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 
 **Migration.** A single, numbered, saved change to the database's structure, written in SQL. *PulseDesk's are in `supabase/migrations/`.*
 
+**`message-reconciliation.ts`.** A pure module that decides which orphaned `messages` rows are genuine user issues (worth replaying as tickets) vs. system bot templates (welcome messages, ban notices) that should stay silent. The key guard that keeps the reconciliation sweep safe.
+
 **MTProto.** Telegram's lower-level protocol that a real *user* account uses (as opposed to the limited Bot API). *PulseDesk connects via MTProto using GramJS.*
 
 **Node.js.** The thing that lets JavaScript run on a server (outside a browser). *PulseDesk's backend runs on Node.*
@@ -95,6 +99,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 **Noise gating.** Dropping spam, greetings, and chatter with cheap rules *before* spending money on an AI call.
 
 **npm (Node Package Manager).** The tool that downloads and manages reusable code packages.
+
+**Orphan message.** A `messages` row that has no corresponding ticket — created when the ingestion pipeline writes the message row first, then crashes before it can create the ticket. The dedup key sits on the `messages` row, so every future re-scan skips it as "already seen." The reconciliation sweep finds and replays these.
 
 **`package.json`.** The project's identity-and-dependencies file, listing packages and shortcut commands.
 
@@ -112,6 +118,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 
 **Pure module / pure function.** Logic that, given the same inputs, always returns the same output and touches nothing else (no database, no network) — making it easy to test in isolation. *PulseDesk's signature pattern; e.g. `conversation-grouping.ts`.*
 
+**Quoted-reply fallback.** When a user sends a message quoting another, and the system finds no active ticket for that quoted parent, it falls back to attaching the reply to the sender's most-recently-active ticket. The fallback is bounded to tickets with activity within the last 48 hours (`QUOTED_FALLBACK_MAX_AGE_MS`) — without this limit, a fresh message could accidentally attach to a month-old ticket.
+
 **Race condition.** A bug where two things happen at almost the same time and interfere — e.g. the AI overwriting a status a human just set. *PulseDesk guards against these with conditional "only update if unchanged" writes.*
 
 **Railway.** The cloud hosting service running PulseDesk's backend as a single always-on container.
@@ -121,6 +129,8 @@ Every technical term used in this guide, in plain English, alphabetical. Use it 
 **React.** A library for building user interfaces from reusable **components**. *PulseDesk's dashboard is a React app.*
 
 **Redaction.** Removing sensitive data and replacing it with placeholders. *Applied to messages before any external AI call.*
+
+**Reconciliation sweep.** The background job (`reconcileOrphanMessages`) that finds orphaned `messages` rows (no ticket) and replays them through the normal ingestion pipeline. Runs hourly. Idempotent — re-running it converges to 0 orphans. Gated behind `INGEST_RECONCILE_ENABLED` / `INGEST_RECONCILE_DRY_RUN` flags so it can be previewed before any writes. The `message-reconciliation.ts` module handles the candidate-filtering logic.
 
 **REST.** A common style for designing APIs using HTTP methods sensibly (GET to read, POST to act).
 
