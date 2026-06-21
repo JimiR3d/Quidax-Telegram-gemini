@@ -901,9 +901,29 @@ This is the embodiment of the core philosophy (Part 2.7). Three connected pieces
 
 **3. The `/train` screen.** A simple flashcard interface where an agent reviews one unreviewed ticket at a time and clicks **Correct**, **Wrong** (and picks the right category), or **Skip** (for messages that aren't a clear support issue — recorded as a no-op so the ticket leaves the queue without becoming misleading training data). It shows the full conversation for context and a link to the original Telegram message.
 
-**Measuring the improvement — the "Verify" feature.** This is how you answer "how do you know the training actually helps?" Verify re-runs the AI over human-reviewed messages **twice each** — once with no training examples (a baseline) and once with the training examples (leave-one-out so it can't cheat) — and reports the accuracy difference. On the seed data it measured a jump from ~33% (baseline) to ~100% (with training). That's a *measured* improvement, not a claim.
+**Measuring the improvement — the "Verify" feature.** This is how you answer "how do you know the training actually helps?" Verify re-runs the AI over **genuinely human-reviewed messages** twice each — once with no training examples (a baseline) and once with the training examples (leave-one-out so it can't cheat) — and reports the accuracy difference. A measured run shows a real positive lift (e.g. baseline ~33% → with-training ~50% on a recent sample). The honest framing: the lift is *measured, not claimed*, and it **grows as the team reviews more real tickets** — it's a tool that gets more meaningful with use, not a headline number to oversell on day one.
 
-> **The point to make:** "Every human correction or confirmation is stored, fed back into future classifications as similar examples, and the system can measure its own accuracy gain from that training using a leave-one-out method so it can't cheat — about 33% to 100% on the seed set."
+> **The point to make:** "Every human correction or confirmation is stored, fed back into future classifications as similar examples, and the system measures its own accuracy gain from that training using a leave-one-out method so it can't cheat. The measured lift is real and grows as more tickets are reviewed."
+
+### Benchmark vs. Verification — what each proves (know this cold)
+
+These are **two different tools** that share one modal, and confusing them is the fastest way to undersell your accuracy story. The distinction:
+
+| | **Benchmark** (`/api/eval`) | **Verification** (`/api/verify`) |
+|---|---|---|
+| Tests against | 20 **fixed, hand-labelled gold cases** baked into the code | The team's real `/train` reviews from the database |
+| Question it answers | "How accurate *is* the classifier?" | "Does human training *improve* it?" |
+| Sample | Curated, stable, the same every run | Grows over time as agents review |
+| Use it for | **The pitch / "how accurate is it?"** | Internal QA / tracking the training loop |
+
+**The benchmark is your trustworthy accuracy number, and here's *why* it's trustworthy** — this is the exact answer to a skeptic:
+- It's a **fixed, hand-curated test set** (12 standard-English Quidax cases, 6 Nigerian Pidgin, 2 capability questions), each labelled by a human with the correct category *and* urgency. Anyone can open `benchmark-cases.ts` and read all 20 cases and the predictions side by side — it's transparent, not a black box.
+- It runs at **temperature 0** (deterministic — the same input always produces the same output) as a **raw-model baseline** with *no* few-shot examples injected. That's deliberate: it means the number is a clean, comparable measure of the base classifier, not something flattered by training data, and it's reproducible run to run.
+- It scores **category and urgency separately**, so you can see exactly where it's strong. Historically ~94% overall, **100% on the Pidgin cases** — and Pidgin is the real differentiator for this community.
+
+**Why Verification is *not* your pitch number (and why honesty here is a strength):** Verification grades the AI against whatever the team has reviewed. Early on that pool is small, and it must only be graded against *genuine human reviews* — an earlier version mistakenly graded against AI-inferred labels on context-free conversation fragments (a bare transaction id like "2388200980" labelled "Deposit Issue"), which no classifier could reproduce from the text alone, so it scored near 0% and looked broken when it was really measuring nothing. The fix was to grade only against real human `/train` reviews and to stop counting transient rate-limit errors as wrong answers. The lesson worth stating out loud: *"I trust the fixed gold benchmark for the accuracy claim; the verification tool is for tracking the training loop internally, and I made it grade only against genuine human reviews so the number means something."*
+
+> **The point to make:** "My accuracy claim comes from a fixed, transparent, hand-labelled benchmark run at temperature zero as a raw-model baseline — ~94% overall and 100% on Pidgin — so it's reproducible and comparable over time. The separate verification tool tracks whether human training is improving things, and I deliberately grade it only against real human reviews so it isn't measuring noise."
 
 ---
 
@@ -1445,7 +1465,10 @@ Then *invite* a deep question, because that's where you shine. The worst thing y
 > "Race protection. The background classifier finishes a few seconds after a message arrives. If a human changed the ticket's status in those seconds, the classifier's final write is conditional — 'set status only if it's still what I started with, otherwise just save the labels and leave status alone.' Same conditional-update pattern guards the auto-resolve-from-admin-reply feature."
 
 **Q: How is it tested?**
-> "The trickiest decisions are extracted into pure modules — same inputs, same outputs, no database or network — and each has a test file covering normal, weird, and edge inputs. That's 172 tests. I concentrated testing where the subtle logic lives. The parts that touch the live Telegram connection can't run safely on a laptop while production is live, so I was honest that their first real exercise is production — and I verified those with production logs and live database queries."
+> "The trickiest decisions are extracted into pure modules — same inputs, same outputs, no database or network — and each has a test file covering normal, weird, and edge inputs. That's 273 tests across 21 files. I concentrated testing where the subtle logic lives. The parts that touch the live Telegram connection can't run safely on a laptop while production is live, so I was honest that their first real exercise is production — and I verified those with production logs and live database queries."
+
+**Q: How is your AI accuracy benchmark calculated?**
+> "It runs a fixed set of 20 hand-labelled gold cases — 12 standard English, 6 Nigerian Pidgin, and 2 capability questions — through the classifier and compares the prediction to the known correct answer for both category and urgency. It runs at temperature zero, so it's deterministic and reproducible, and it's a raw-model baseline with no training examples injected — that keeps the number clean and comparable over time rather than flattered by training data. The cases live in a committed code file anyone can read, so it's fully transparent. Historically about 94% overall and 100% on the Pidgin cases, which is the part that matters most for this community."
 
 ---
 
@@ -1465,7 +1488,7 @@ Then *invite* a deep question, because that's where you shine. The worst thing y
 ## 8.6 Product & judgment questions
 
 **Q: How would you measure success?**
-> "Agent time saved on reading chatter, faster resolution of high-urgency issues, and — the one I'm proudest of — a measurable drop in how often humans need to correct the AI over time. The system can actually measure its own accuracy gain from training, using a leave-one-out method so it can't cheat — about 33% to 100% on the seed data."
+> "Agent time saved on reading chatter, faster resolution of high-urgency issues, and — the one I'm proudest of — a measurable drop in how often humans need to correct the AI over time. The system can actually measure its own accuracy gain from training, using a leave-one-out method so a message never sees its own answer. It shows a real positive lift, and — being honest — that signal gets stronger as the team reviews more real tickets; I'd rather state a measured, growing number than a flashy one I can't stand behind."
 
 **Q: Tell me about a trade-off you made.**
 > Pick one: polling over WebSockets (simplicity over efficiency), two AI models (cost/quality matched to task), or one big backend file (cohesion now, with a known refactor path). Each shows deliberate decision-making.
@@ -1485,6 +1508,12 @@ Then *invite* a deep question, because that's where you shine. The worst thing y
 
 **Q: How do I know your '14-second latency' or '53% resolution rate' numbers are real?**
 > "Because I measured them against ground truth, not the dashboard's own claims. The latency was a timed test message landing in the database; the resolution rate was reconciled against direct database counts — which is actually how I *caught* an earlier version inflating it to 80% by counting spam as resolutions. I don't trust a number until I've checked it against the source data."
+
+**Q: You say the AI is ~94% accurate — what is that tested against, and why should I trust it?**
+> "It's a fixed benchmark, not a vibe. Twenty cases I hand-labelled with the correct category and urgency — standard English, Nigerian Pidgin, and capability questions — that the classifier runs against at temperature zero, so it's deterministic and reproducible. It's a raw-model baseline with no training examples mixed in, which keeps the score clean and comparable over time. And it's transparent: the cases sit in a committed code file, so you can read all twenty and the predictions side by side rather than taking my word for it. The Pidgin coverage is the part I'd point at — 100% on those cases, because that's where a generic model fails this community."
+
+**Q: How do you know the human training actually improves the AI — not just in theory?**
+> "There's a separate verification tool that re-runs the AI over messages the team has actually reviewed, twice each — once with no training examples and once with them — using a leave-one-out method so a message never sees its own answer. The gap between the two scores is the measured training lift. I'll be straight with you: that number is most meaningful once enough real tickets have been reviewed, so I treat the fixed benchmark as the accuracy claim and the verification tool as an internal tracker of the training loop. I also deliberately made it grade only against genuine human reviews — an earlier version was grading against AI-guessed labels on context-free message fragments, which made the score meaningless, and I fixed that. Knowing the difference between a number you can stand behind and one you can't is the point."
 
 **Q: This is a personal Telegram account reading a community — is that allowed / ethical?**
 > "It reads as a normal member would — it doesn't access anything a member can't see, and private data is redacted before any external processing. It's a triage assistant for the support team, not a surveillance tool, and it can't post to the group at all. For a real production deployment with Quidax, the proper path is an official, sanctioned account with the right permissions — which is also what would unlock the auto-reply feature."
@@ -1577,11 +1606,13 @@ Point at the cards.
 **Step 6 — The training loop (the philosophy made visible).**
 Open the `/train` screen.
 > "This is the core idea — the human-in-the-loop. Agents review the AI's labels one at a time: Correct, Wrong, or Skip. Every correction is stored and fed back so the AI gets better at this community's messages over time."
-Then mention Verify:
-> "And I can actually *measure* the improvement — there's a function that re-runs the AI with and without the training data, using a method that prevents it from cheating, and reports the accuracy gain. On my seed data that was about 33% up to 100%."
+Then mention Verify (describe it — don't make it your live accuracy proof):
+> "And I can actually *measure* whether that training is working — there's a verification function that re-runs the AI with and without the training data, using a method that prevents it from cheating, and reports the lift. It's an internal tracking tool; it gets more meaningful as the team reviews more tickets."
 
-**Step 7 — The benchmark (if asked about accuracy).**
-> "There's also a fixed accuracy benchmark — a set of hand-labelled gold examples, including Pidgin ones, that I can run the AI against any time as a stable yardstick. It's separate from live tickets on purpose, so the number is comparable over time."
+**⚠️ Demo note:** do **not** click "Run Verification" live as your accuracy proof. It's an internal QA tool whose score depends on how much the team has reviewed, and it takes a minute of live AI calls. Your accuracy number is the **benchmark** (next step). If asked to show training working, describe the leave-one-out method rather than running it on stage.
+
+**Step 7 — The benchmark (this is your accuracy number).**
+> "For accuracy, the number I'd point to is a fixed benchmark — 20 hand-labelled gold cases, including Nigerian Pidgin ones, that I run the AI against as a stable yardstick. It's deterministic and it's a raw-model baseline, so the number is reproducible and comparable over time, not flattered by training data. You can read all 20 cases in the code — it's transparent. About 94% overall and 100% on the Pidgin cases, which is the part that matters most here."
 
 **Step 8 — The auto-reply feature (describe, don't fire).**
 > "There's one more capability, fully built but currently switched off: when an agent resolves a ticket, the system can automatically post an empathetic update to the user in Telegram. It's behind a kill switch, a dry-run mode, send-once protection, and rate limits. It's parked only because the Quidax group is broadcast-only — admins-only posting — so it needs Quidax to grant posting rights. The moment they do, it's a one-setting change to go live."

@@ -68,7 +68,10 @@ Then *invite* a deep question, because that's where you shine. The worst thing y
 > "Race protection. The background classifier finishes a few seconds after a message arrives. If a human changed the ticket's status in those seconds, the classifier's final write is conditional — 'set status only if it's still what I started with, otherwise just save the labels and leave status alone.' Same conditional-update pattern guards the auto-resolve-from-admin-reply feature."
 
 **Q: How is it tested?**
-> "The trickiest decisions are extracted into pure modules — same inputs, same outputs, no database or network — and each has a test file covering normal, weird, and edge inputs. That's 172 tests. I concentrated testing where the subtle logic lives. The parts that touch the live Telegram connection can't run safely on a laptop while production is live, so I was honest that their first real exercise is production — and I verified those with production logs and live database queries."
+> "The trickiest decisions are extracted into pure modules — same inputs, same outputs, no database or network — and each has a test file covering normal, weird, and edge inputs. That's 273 tests across 21 files. I concentrated testing where the subtle logic lives. The parts that touch the live Telegram connection can't run safely on a laptop while production is live, so I was honest that their first real exercise is production — and I verified those with production logs and live database queries."
+
+**Q: How is your AI accuracy benchmark calculated?**
+> "It runs a fixed set of 20 hand-labelled gold cases — 12 standard English, 6 Nigerian Pidgin, and 2 capability questions — through the classifier and compares the prediction to the known correct answer for both category and urgency. It runs at temperature zero, so it's deterministic and reproducible, and it's a raw-model baseline with no training examples injected — that keeps the number clean and comparable over time rather than flattered by training data. The cases live in a committed code file anyone can read, so it's fully transparent. Historically about 94% overall and 100% on the Pidgin cases, which is the part that matters most for this community."
 
 ---
 
@@ -88,7 +91,7 @@ Then *invite* a deep question, because that's where you shine. The worst thing y
 ## 8.6 Product & judgment questions
 
 **Q: How would you measure success?**
-> "Agent time saved on reading chatter, faster resolution of high-urgency issues, and — the one I'm proudest of — a measurable drop in how often humans need to correct the AI over time. The system can actually measure its own accuracy gain from training, using a leave-one-out method so it can't cheat — about 33% to 100% on the seed data."
+> "Agent time saved on reading chatter, faster resolution of high-urgency issues, and — the one I'm proudest of — a measurable drop in how often humans need to correct the AI over time. The system can actually measure its own accuracy gain from training, using a leave-one-out method so a message never sees its own answer. It shows a real positive lift, and — being honest — that signal gets stronger as the team reviews more real tickets; I'd rather state a measured, growing number than a flashy one I can't stand behind."
 
 **Q: Tell me about a trade-off you made.**
 > Pick one: polling over WebSockets (simplicity over efficiency), two AI models (cost/quality matched to task), or one big backend file (cohesion now, with a known refactor path). Each shows deliberate decision-making.
@@ -108,6 +111,12 @@ Then *invite* a deep question, because that's where you shine. The worst thing y
 
 **Q: How do I know your '14-second latency' or '53% resolution rate' numbers are real?**
 > "Because I measured them against ground truth, not the dashboard's own claims. The latency was a timed test message landing in the database; the resolution rate was reconciled against direct database counts — which is actually how I *caught* an earlier version inflating it to 80% by counting spam as resolutions. I don't trust a number until I've checked it against the source data."
+
+**Q: You say the AI is ~94% accurate — what is that tested against, and why should I trust it?**
+> "It's a fixed benchmark, not a vibe. Twenty cases I hand-labelled with the correct category and urgency — standard English, Nigerian Pidgin, and capability questions — that the classifier runs against at temperature zero, so it's deterministic and reproducible. It's a raw-model baseline with no training examples mixed in, which keeps the score clean and comparable over time. And it's transparent: the cases sit in a committed code file, so you can read all twenty and the predictions side by side rather than taking my word for it. The Pidgin coverage is the part I'd point at — 100% on those cases, because that's where a generic model fails this community."
+
+**Q: How do you know the human training actually improves the AI — not just in theory?**
+> "There's a separate verification tool that re-runs the AI over messages the team has actually reviewed, twice each — once with no training examples and once with them — using a leave-one-out method so a message never sees its own answer. The gap between the two scores is the measured training lift. I'll be straight with you: that number is most meaningful once enough real tickets have been reviewed, so I treat the fixed benchmark as the accuracy claim and the verification tool as an internal tracker of the training loop. I also deliberately made it grade only against genuine human reviews — an earlier version was grading against AI-guessed labels on context-free message fragments, which made the score meaningless, and I fixed that. Knowing the difference between a number you can stand behind and one you can't is the point."
 
 **Q: This is a personal Telegram account reading a community — is that allowed / ethical?**
 > "It reads as a normal member would — it doesn't access anything a member can't see, and private data is redacted before any external processing. It's a triage assistant for the support team, not a surveillance tool, and it can't post to the group at all. For a real production deployment with Quidax, the proper path is an official, sanctioned account with the right permissions — which is also what would unlock the auto-reply feature."

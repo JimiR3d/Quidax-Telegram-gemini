@@ -106,9 +106,29 @@ This is the embodiment of the core philosophy (Part 2.7). Three connected pieces
 
 **3. The `/train` screen.** A simple flashcard interface where an agent reviews one unreviewed ticket at a time and clicks **Correct**, **Wrong** (and picks the right category), or **Skip** (for messages that aren't a clear support issue — recorded as a no-op so the ticket leaves the queue without becoming misleading training data). It shows the full conversation for context and a link to the original Telegram message.
 
-**Measuring the improvement — the "Verify" feature.** This is how you answer "how do you know the training actually helps?" Verify re-runs the AI over human-reviewed messages **twice each** — once with no training examples (a baseline) and once with the training examples (leave-one-out so it can't cheat) — and reports the accuracy difference. On the seed data it measured a jump from ~33% (baseline) to ~100% (with training). That's a *measured* improvement, not a claim.
+**Measuring the improvement — the "Verify" feature.** This is how you answer "how do you know the training actually helps?" Verify re-runs the AI over **genuinely human-reviewed messages** twice each — once with no training examples (a baseline) and once with the training examples (leave-one-out so it can't cheat) — and reports the accuracy difference. A measured run shows a real positive lift (e.g. baseline ~33% → with-training ~50% on a recent sample). The honest framing: the lift is *measured, not claimed*, and it **grows as the team reviews more real tickets** — it's a tool that gets more meaningful with use, not a headline number to oversell on day one.
 
-> **The point to make:** "Every human correction or confirmation is stored, fed back into future classifications as similar examples, and the system can measure its own accuracy gain from that training using a leave-one-out method so it can't cheat — about 33% to 100% on the seed set."
+> **The point to make:** "Every human correction or confirmation is stored, fed back into future classifications as similar examples, and the system measures its own accuracy gain from that training using a leave-one-out method so it can't cheat. The measured lift is real and grows as more tickets are reviewed."
+
+### Benchmark vs. Verification — what each proves (know this cold)
+
+These are **two different tools** that share one modal, and confusing them is the fastest way to undersell your accuracy story. The distinction:
+
+| | **Benchmark** (`/api/eval`) | **Verification** (`/api/verify`) |
+|---|---|---|
+| Tests against | 20 **fixed, hand-labelled gold cases** baked into the code | The team's real `/train` reviews from the database |
+| Question it answers | "How accurate *is* the classifier?" | "Does human training *improve* it?" |
+| Sample | Curated, stable, the same every run | Grows over time as agents review |
+| Use it for | **The pitch / "how accurate is it?"** | Internal QA / tracking the training loop |
+
+**The benchmark is your trustworthy accuracy number, and here's *why* it's trustworthy** — this is the exact answer to a skeptic:
+- It's a **fixed, hand-curated test set** (12 standard-English Quidax cases, 6 Nigerian Pidgin, 2 capability questions), each labelled by a human with the correct category *and* urgency. Anyone can open `benchmark-cases.ts` and read all 20 cases and the predictions side by side — it's transparent, not a black box.
+- It runs at **temperature 0** (deterministic — the same input always produces the same output) as a **raw-model baseline** with *no* few-shot examples injected. That's deliberate: it means the number is a clean, comparable measure of the base classifier, not something flattered by training data, and it's reproducible run to run.
+- It scores **category and urgency separately**, so you can see exactly where it's strong. Historically ~94% overall, **100% on the Pidgin cases** — and Pidgin is the real differentiator for this community.
+
+**Why Verification is *not* your pitch number (and why honesty here is a strength):** Verification grades the AI against whatever the team has reviewed. Early on that pool is small, and it must only be graded against *genuine human reviews* — an earlier version mistakenly graded against AI-inferred labels on context-free conversation fragments (a bare transaction id like "2388200980" labelled "Deposit Issue"), which no classifier could reproduce from the text alone, so it scored near 0% and looked broken when it was really measuring nothing. The fix was to grade only against real human `/train` reviews and to stop counting transient rate-limit errors as wrong answers. The lesson worth stating out loud: *"I trust the fixed gold benchmark for the accuracy claim; the verification tool is for tracking the training loop internally, and I made it grade only against genuine human reviews so the number means something."*
+
+> **The point to make:** "My accuracy claim comes from a fixed, transparent, hand-labelled benchmark run at temperature zero as a raw-model baseline — ~94% overall and 100% on Pidgin — so it's reproducible and comparable over time. The separate verification tool tracks whether human training is improving things, and I deliberately grade it only against real human reviews so it isn't measuring noise."
 
 ---
 

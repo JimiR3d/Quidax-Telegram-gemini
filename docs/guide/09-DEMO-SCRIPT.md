@@ -55,11 +55,13 @@ Point at the cards.
 **Step 6 — The training loop (the philosophy made visible).**
 Open the `/train` screen.
 > "This is the core idea — the human-in-the-loop. Agents review the AI's labels one at a time: Correct, Wrong, or Skip. Every correction is stored and fed back so the AI gets better at this community's messages over time."
-Then mention Verify:
-> "And I can actually *measure* the improvement — there's a function that re-runs the AI with and without the training data, using a method that prevents it from cheating, and reports the accuracy gain. On my seed data that was about 33% up to 100%."
+Then mention Verify (describe it — don't make it your live accuracy proof):
+> "And I can actually *measure* whether that training is working — there's a verification function that re-runs the AI with and without the training data, using a method that prevents it from cheating, and reports the lift. It's an internal tracking tool; it gets more meaningful as the team reviews more tickets."
 
-**Step 7 — The benchmark (if asked about accuracy).**
-> "There's also a fixed accuracy benchmark — a set of hand-labelled gold examples, including Pidgin ones, that I can run the AI against any time as a stable yardstick. It's separate from live tickets on purpose, so the number is comparable over time."
+**⚠️ Demo note:** do **not** click "Run Verification" live as your accuracy proof. It's an internal QA tool whose score depends on how much the team has reviewed, and it takes a minute of live AI calls. Your accuracy number is the **benchmark** (next step). If asked to show training working, describe the leave-one-out method rather than running it on stage.
+
+**Step 7 — The benchmark (this is your accuracy number).**
+> "For accuracy, the number I'd point to is a fixed benchmark — 20 hand-labelled gold cases, including Nigerian Pidgin ones, that I run the AI against as a stable yardstick. It's deterministic and it's a raw-model baseline, so the number is reproducible and comparable over time, not flattered by training data. You can read all 20 cases in the code — it's transparent. About 94% overall and 100% on the Pidgin cases, which is the part that matters most here."
 
 **Step 8 — The auto-reply feature (describe, don't fire).**
 > "There's one more capability, fully built but currently switched off: when an agent resolves a ticket, the system can automatically post an empathetic update to the user in Telegram. It's behind a kill switch, a dry-run mode, send-once protection, and rate limits. It's parked only because the Quidax group is broadcast-only — admins-only posting — so it needs Quidax to grant posting rights. The moment they do, it's a one-setting change to go live."
