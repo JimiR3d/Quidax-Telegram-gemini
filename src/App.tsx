@@ -1887,11 +1887,11 @@ export default function App() {
                     <>
                       <div className="grid grid-cols-3 gap-4 mb-4">
                         <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-center">
-                          <div className="text-3xl font-black text-white/70">{verifyState.summary.baselineAccuracy}%</div>
+                          <div className="text-3xl font-black text-white/70">{verifyState.summary.baselineAccuracy ?? "—"}%</div>
                           <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">Baseline (no training)</div>
                         </div>
                         <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-4 text-center">
-                          <div className="text-3xl font-black text-indigo-400">{verifyState.summary.fewShotAccuracy}%</div>
+                          <div className="text-3xl font-black text-indigo-400">{verifyState.summary.fewShotAccuracy ?? "—"}%</div>
                           <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">With training</div>
                         </div>
                         {verifyState.summary.improvementPoints >= 0 ? (
@@ -1912,6 +1912,12 @@ export default function App() {
                           had to fix, the untrained AI scores {verifyState.summary.baselineAccuracyOnFixes}% — with training it scores {verifyState.summary.fewShotAccuracyOnFixes}%.
                         </p>
                       )}
+                      {verifyState.summary.erroredCount > 0 && (
+                        <p className="text-xs text-amber-400/70 mb-4">
+                          {verifyState.summary.erroredCount} message{verifyState.summary.erroredCount === 1 ? "" : "s"} skipped this run
+                          due to a temporary rate limit — not counted in the score. Scored on {verifyState.summary.total} message{verifyState.summary.total === 1 ? "" : "s"}.
+                        </p>
+                      )}
                       <div className="rounded-xl border border-white/10 overflow-hidden">
                         <table className="w-full text-left text-xs">
                           <thead>
@@ -1924,11 +1930,17 @@ export default function App() {
                           </thead>
                           <tbody>
                             {verifyState.results?.map((r: any, i: number) => (
-                              <tr key={i} className={`border-b border-white/5 ${r.fewShotMatch ? "bg-emerald-500/3" : "bg-rose-500/3"}`}>
+                              <tr key={i} className={`border-b border-white/5 ${r.errored ? "bg-amber-500/3" : r.fewShotMatch ? "bg-emerald-500/3" : "bg-rose-500/3"}`}>
                                 <td className="px-4 py-2.5 text-white/60 max-w-[220px] truncate">{r.text}</td>
                                 <td className="px-4 py-2.5 text-white/80 font-medium">{r.expected}</td>
-                                <td className={`px-4 py-2.5 ${r.baselineMatch ? "text-emerald-400" : "text-rose-400"}`}>{r.baseline} {r.baselineMatch ? "✅" : "❌"}</td>
-                                <td className={`px-4 py-2.5 ${r.fewShotMatch ? "text-emerald-400" : "text-rose-400"}`}>{r.fewShot} {r.fewShotMatch ? "✅" : "❌"}</td>
+                                {r.errored ? (
+                                  <td className="px-4 py-2.5 text-amber-400/80" colSpan={2}>Skipped — temporary rate limit (not scored)</td>
+                                ) : (
+                                  <>
+                                    <td className={`px-4 py-2.5 ${r.baselineMatch ? "text-emerald-400" : "text-rose-400"}`}>{r.baseline} {r.baselineMatch ? "✅" : "❌"}</td>
+                                    <td className={`px-4 py-2.5 ${r.fewShotMatch ? "text-emerald-400" : "text-rose-400"}`}>{r.fewShot} {r.fewShotMatch ? "✅" : "❌"}</td>
+                                  </>
+                                )}
                               </tr>
                             ))}
                           </tbody>

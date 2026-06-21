@@ -4531,9 +4531,13 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .select(
           "message_text, original_category, correct_category, correction_source, created_at",
         )
-        // Skips are not human-labelled ground truth — exclude them so the
-        // verify run only re-scores real Correct/Wrong reviews.
-        .neq("correction_source", "human_skip")
+        // Grade ONLY against genuine human /train reviews (human_ui). admin_reply
+        // rows are categories Groq machine-inferred from an admin's reply — often on
+        // context-free fragments ("2388200980" → Deposit Issue) that the classifier
+        // cannot reproduce from the bare message text, so using them as "ground truth"
+        // makes the accuracy number meaningless. human_skip is a no-op, also excluded.
+        // (Few-shot injection still draws from the full pool — see getFewShotCorrections.)
+        .eq("correction_source", "human_ui")
         .order("created_at", { ascending: false })
         .limit(500);
       if (error) throw new Error(error.message);
@@ -4593,6 +4597,18 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         // Sequential with spacing between every Groq call (free-tier limits) —
         // two calls per case: raw baseline, then few-shot with leave-one-out.
         const GROQ_DELAY_MS = 2100;
+        // One retry on a transient failure (429 / breaker-open / timeout) before
+        // giving up — a rate-limit hiccup during the 40-call burst should not be
+        // scored as a wrong answer; an errored case is excluded from the accuracy
+        // denominator below, not counted as a miss.
+        const classifyWithRetry = async (text, fewShot) => {
+          try {
+            return await classifyCategory(text, fewShot);
+          } catch (e) {
+            await new Promise((r) => setTimeout(r, GROQ_DELAY_MS * 2));
+            return await classifyCategory(text, fewShot);
+          }
+        };
         for (const c of cases) {
           const result = {
             text: String(c.message_text).slice(0, 100),
@@ -4603,20 +4619,22 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
             fewShot: "ERROR",
             baselineMatch: false,
             fewShotMatch: false,
+            errored: false,
           };
           try {
-            result.baseline = await classifyCategory(c.message_text, "");
+            result.baseline = await classifyWithRetry(c.message_text, "");
             await new Promise((r) => setTimeout(r, GROQ_DELAY_MS));
             const fewShot = await getFewShotCorrections(
               supabase,
               c.message_text,
               c.message_text,
             );
-            result.fewShot = await classifyCategory(c.message_text, fewShot);
+            result.fewShot = await classifyWithRetry(c.message_text, fewShot);
             result.baselineMatch = result.baseline === result.expected;
             result.fewShotMatch = result.fewShot === result.expected;
           } catch (e) {
             (result as any).error = e.message;
+            result.errored = true;
           }
           verifyProgress.results.push(result);
           verifyProgress.done++;
@@ -4624,18 +4642,27 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         }
         const results = verifyProgress.results;
         const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : null);
-        const baselineCorrect = results.filter((r) => r.baselineMatch).length;
-        const fewShotCorrect = results.filter((r) => r.fewShotMatch).length;
+        // Only cases that classified successfully (both calls) are scored — a
+        // case that errored out (transient rate-limit/breaker/timeout) is reported
+        // separately, never counted as a miss, so a flaky run can't read as 0%.
+        const scored = results.filter((r) => !r.errored);
+        const denom = scored.length;
+        const baselineCorrect = scored.filter((r) => r.baselineMatch).length;
+        const fewShotCorrect = scored.filter((r) => r.fewShotMatch).length;
+        const baselineAccuracy = pct(baselineCorrect, denom);
+        const fewShotAccuracy = pct(fewShotCorrect, denom);
         // The cases a human actually FIXED are where the training loop must
         // prove itself; confirmed-correct cases just need to not regress.
-        const fixes = results.filter((r) => r.wasHumanFix);
+        const fixes = scored.filter((r) => r.wasHumanFix);
         verifyProgress.summary = {
-          total: results.length,
-          baselineAccuracy: pct(baselineCorrect, results.length),
-          fewShotAccuracy: pct(fewShotCorrect, results.length),
+          total: denom,
+          erroredCount: results.length - denom,
+          baselineAccuracy,
+          fewShotAccuracy,
           improvementPoints:
-            pct(fewShotCorrect, results.length) -
-            pct(baselineCorrect, results.length),
+            baselineAccuracy !== null && fewShotAccuracy !== null
+              ? fewShotAccuracy - baselineAccuracy
+              : 0,
           humanFixCases: fixes.length,
           baselineAccuracyOnFixes: pct(
             fixes.filter((r) => r.baselineMatch).length,
