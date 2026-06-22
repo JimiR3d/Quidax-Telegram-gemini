@@ -4,6 +4,7 @@ import {
   buildUsernameMap,
   normalizeDiffMessage,
   sortDiffMessagesOldestFirst,
+  extractChannelEditsDeletes,
 } from "../channel-difference";
 
 // A minimal raw TL Message (className "Message" with a `message` text field).
@@ -23,6 +24,7 @@ describe("classifyChannelDifference", () => {
       pts: 215300,
       final: true,
       newMessages: [rawMessage()],
+      otherUpdates: [],
       users: [],
       chats: [],
     };
@@ -32,7 +34,24 @@ describe("classifyChannelDifference", () => {
       expect(c.newPts).toBe(215300);
       expect(c.final).toBe(true);
       expect(c.messages).toHaveLength(1);
+      expect(c.otherUpdates).toEqual([]);
     }
+  });
+
+  it("surfaces otherUpdates on the messages result (defaults to [])", () => {
+    const withUpd = classifyChannelDifference({
+      className: "updates.ChannelDifference",
+      pts: 5,
+      newMessages: [],
+      otherUpdates: [{ className: "UpdateDeleteChannelMessages", messages: [9] }],
+    });
+    expect(withUpd.kind === "messages" && withUpd.otherUpdates).toHaveLength(1);
+    const missing = classifyChannelDifference({
+      className: "updates.ChannelDifference",
+      pts: 5,
+      newMessages: [],
+    });
+    expect(missing.kind === "messages" && missing.otherUpdates).toEqual([]);
   });
 
   it("treats a non-true `final` as not-final (keep draining)", () => {
@@ -207,5 +226,63 @@ describe("sortDiffMessagesOldestFirst", () => {
     expect(sortDiffMessagesOldestFirst([])).toEqual([]);
     expect(sortDiffMessagesOldestFirst(null)).toEqual([]);
     expect(sortDiffMessagesOldestFirst(undefined)).toEqual([]);
+  });
+});
+
+describe("extractChannelEditsDeletes", () => {
+  it("extracts an edit (text is .message, not .text)", () => {
+    const { edits, deletedIds } = extractChannelEditsDeletes([
+      {
+        className: "UpdateEditChannelMessage",
+        message: { className: "Message", id: 140111, message: "edited body" },
+      },
+    ]);
+    expect(edits).toEqual([{ id: 140111, text: "edited body" }]);
+    expect(deletedIds).toEqual([]);
+  });
+
+  it("extracts deleted ids from UpdateDeleteChannelMessages", () => {
+    const { edits, deletedIds } = extractChannelEditsDeletes([
+      { className: "UpdateDeleteChannelMessages", messages: [11, 12, 13] },
+    ]);
+    expect(deletedIds).toEqual([11, 12, 13]);
+    expect(edits).toEqual([]);
+  });
+
+  it("handles a mixed batch of edits and deletes", () => {
+    const out = extractChannelEditsDeletes([
+      { className: "UpdateNewChannelMessage" }, // ignored
+      { className: "UpdateEditChannelMessage", message: { id: 5, message: "x" } },
+      { className: "UpdateDeleteChannelMessages", messages: [7, 8] },
+    ]);
+    expect(out.edits).toEqual([{ id: 5, text: "x" }]);
+    expect(out.deletedIds).toEqual([7, 8]);
+  });
+
+  it("skips an edit with empty/missing text or id", () => {
+    const out = extractChannelEditsDeletes([
+      { className: "UpdateEditChannelMessage", message: { id: 5, message: "" } },
+      { className: "UpdateEditChannelMessage", message: { id: 6 } },
+      { className: "UpdateEditChannelMessage", message: { message: "no id" } },
+    ]);
+    expect(out.edits).toEqual([]);
+  });
+
+  it("ignores unparseable / non-numeric ids and other-chat updates", () => {
+    const out = extractChannelEditsDeletes([
+      { className: "UpdateDeleteChannelMessages", messages: ["x", 9, null] },
+      { className: "UpdateEditMessage", message: { id: 1, message: "dm" } }, // not a channel update
+    ]);
+    expect(out.deletedIds).toEqual([9]);
+    expect(out.edits).toEqual([]);
+  });
+
+  it("never throws on null / empty / garbage input", () => {
+    expect(extractChannelEditsDeletes(null)).toEqual({ edits: [], deletedIds: [] });
+    expect(extractChannelEditsDeletes(undefined)).toEqual({ edits: [], deletedIds: [] });
+    expect(extractChannelEditsDeletes([null, 1, "x"] as any)).toEqual({
+      edits: [],
+      deletedIds: [],
+    });
   });
 });

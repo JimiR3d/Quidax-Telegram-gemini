@@ -66,6 +66,10 @@ export type ChannelDifferenceClassification =
   | {
       kind: "messages";
       messages: RawDiffMessage[];
+      // Non-message updates in the same difference (edits, deletes, pins…). The
+      // channel's UpdateEditChannelMessage / UpdateDeleteChannelMessages ride
+      // HERE, not in newMessages — see extractChannelEditsDeletes below.
+      otherUpdates: any[];
       newPts: number | null;
       final: boolean;
     }
@@ -100,6 +104,7 @@ export function classifyChannelDifference(
       return {
         kind: "messages",
         messages: Array.isArray(resp.newMessages) ? resp.newMessages : [],
+        otherUpdates: Array.isArray(resp.otherUpdates) ? resp.otherUpdates : [],
         newPts: toFinitePts(resp.pts),
         // `final` is a TL flag: true means the difference is complete. Only an
         // explicit true stops the drain loop; anything else means "maybe more,
@@ -183,4 +188,51 @@ export function sortDiffMessagesOldestFirst<T extends { id: number | string }>(
   messages: T[] | null | undefined,
 ): T[] {
   return [...(messages || [])].sort((a, b) => Number(a.id) - Number(b.id));
+}
+
+// A channel message edit pulled from a difference's otherUpdates.
+export interface ChannelEdit {
+  id: number;
+  text: string;
+}
+
+export interface ChannelEditsDeletes {
+  edits: ChannelEdit[];
+  deletedIds: number[];
+}
+
+// Phase B (2026-06-22): edited/deleted channel messages were never handled in
+// production — the edit/delete logic was wired ONLY to the dead live Raw
+// listener, and the working getChannelDifference drain discarded otherUpdates.
+// This pulls the channel's UpdateEditChannelMessage / UpdateDeleteChannelMessages
+// out of a difference's otherUpdates so the drain can apply them through the same
+// code path the Raw listener used. Pure + defensive: a surprise/partial update
+// is skipped, never throws.
+//   - UpdateEditChannelMessage : update.message is an Api.Message; its text is
+//     `.message` (NOT `.text`), its id is `.id`.
+//   - UpdateDeleteChannelMessages : update.messages is an array of deleted ids.
+export function extractChannelEditsDeletes(
+  otherUpdates: Array<any> | null | undefined,
+): ChannelEditsDeletes {
+  const edits: ChannelEdit[] = [];
+  const deletedIds: number[] = [];
+  for (const u of otherUpdates || []) {
+    if (!u || typeof u !== "object") continue;
+    if (u.className === "UpdateEditChannelMessage") {
+      const m = u.message;
+      if (m && m.id != null && typeof m.message === "string" && m.message) {
+        const idN = Number(m.id);
+        // Real Telegram message ids are positive integers; > 0 also rejects the
+        // Number(null)/Number("") === 0 coercion traps.
+        if (Number.isFinite(idN) && idN > 0) edits.push({ id: idN, text: m.message });
+      }
+    } else if (u.className === "UpdateDeleteChannelMessages") {
+      const ids = Array.isArray(u.messages) ? u.messages : [];
+      for (const raw of ids) {
+        const idN = Number(raw);
+        if (Number.isFinite(idN) && idN > 0) deletedIds.push(idN);
+      }
+    }
+  }
+  return { edits, deletedIds };
 }

@@ -1,0 +1,12 @@
+-- 018_messages_deleted_at_up.sql
+--
+-- Phase B (2026-06-22): edited/deleted Telegram messages were never handled in
+-- production (the edit/delete logic was wired only to the dead live Raw
+-- listener). The delete handler now runs over the working getChannelDifference
+-- path and SOFT-deletes a message rather than erasing it: `messages.deleted_at`
+-- records when Telegram reported the deletion (auditable, reversible), and the
+-- ticket is Dismissed only when the deleted message was the ticket root.
+--
+-- Additive and reversible. `messages` already carries `edited_at` (migration
+-- 005); this mirrors it for deletions.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
