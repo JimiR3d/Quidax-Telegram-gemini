@@ -21,6 +21,10 @@ import {
 } from "./classification-policy";
 import { disposeUnattachedMessage } from "./admin-message-policy";
 import {
+  selectAdminAttachTarget,
+  ADMIN_UNQUOTED_ATTACH_WINDOW_MS,
+} from "./admin-reply-attach";
+import {
   parseReclassifyVerdict,
   shouldResolveFromAdminReply,
   AUTO_RESOLVABLE_STATUSES,
@@ -41,6 +45,7 @@ import {
   buildUsernameMap,
   normalizeDiffMessage,
   sortDiffMessagesOldestFirst,
+  extractChannelEditsDeletes,
 } from "./channel-difference";
 import { BENCHMARK_CASES } from "./benchmark-cases";
 import { describeLLMError, isQuotaExhaustedError } from "./gemini-quota";
@@ -2357,7 +2362,7 @@ ${lines.join("\n---\n")}`;
           let parentTicket = null;
           const { data: parentMsg } = await supabase
             .from("messages")
-            .select("id")
+            .select("id, sender_hash")
             .eq("telegram_message_id", String(replyToMsgId))
             .maybeSingle();
           if (parentMsg) {
@@ -2367,6 +2372,27 @@ ${lines.join("\n---\n")}`;
               .eq("message_id", parentMsg.id)
               .maybeSingle();
             parentTicket = pt;
+            // A2 (2026-06-22): the quoted message IS in our DB but is not a
+            // ticket ROOT — it is a folded [USER_FOLLOWUP]/[USER_REPLY] block of
+            // an existing thread. Resolve that thread via the quoted message's
+            // own sender_hash (reply-to metadata as ground truth) and attach the
+            // admin reply there. Without this the admin reply was dropped:
+            // recoverQuotedParent below re-ingests the quoted id, hits the
+            // top-of-function dedup, returns null → fall through → drop-admin.
+            if (!parentTicket && parentMsg.sender_hash) {
+              const { data: senderTickets } = await supabase
+                .from("tickets")
+                .select("*")
+                .eq("group_id", groupId)
+                .eq("sender_hash", parentMsg.sender_hash)
+                .eq("is_admin_message", false)
+                .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
+                .order("last_message_at", { ascending: false, nullsFirst: false })
+                .limit(1);
+              if (senderTickets && senderTickets.length > 0) {
+                parentTicket = senderTickets[0];
+              }
+            }
           }
           // Fix 5: the quoted parent was never ingested (the live listener was
           // down, or it predates the 2-hour sweep window). Fetch it from
@@ -2604,26 +2630,35 @@ ${lines.join("\n---\n")}`;
       }
     }
     if (isAdminSender && !replyToMsgId) {
-      // 90-second window heuristic: an admin answering in the group without
-      // quoting anyone is almost always responding to whatever just came in.
-      // Attach the reply to the most recent open ticket in this group if that
-      // ticket arrived within the 90 seconds before the admin's message;
-      // otherwise fall through and record the admin message as before.
+      // Un-quoted admin reply: an admin answering in the group without quoting
+      // anyone is almost always responding to the most-recently-active user
+      // ticket. A3 (2026-06-22): the old hard 90-second window (keyed on
+      // created_at) dropped the COMMON case of an admin replying a few minutes
+      // later — proven live, ticket 5aec106f lost 4 real admin replies. Widen to
+      // ADMIN_UNQUOTED_ATTACH_WINDOW_MS (~30 min) of LAST ACTIVITY and let the
+      // pure selectAdminAttachTarget pick the single most-recently-active ticket.
+      // Past the window → fall through to the drop fallback below (genuine admin
+      // chatter / news / market commentary still never becomes a ticket).
       try {
         const adminMsgTime = new Date(msgDateISO).getTime();
-        const windowStartISO = new Date(adminMsgTime - 90 * 1e3).toISOString();
+        const windowStartISO = new Date(
+          adminMsgTime - ADMIN_UNQUOTED_ATTACH_WINDOW_MS,
+        ).toISOString();
         const { data: candidates } = await supabase
           .from("tickets")
           .select("*")
           .eq("group_id", groupId)
           .eq("is_admin_message", false)
           .in("status", ["Open", "In Review", "Escalated", "Awaiting User"])
-          .gte("created_at", windowStartISO)
-          .lte("created_at", msgDateISO)
-          .order("created_at", { ascending: false })
-          .limit(1);
-        if (candidates && candidates.length > 0) {
-          const parentTicket = candidates[0];
+          .gte("last_message_at", windowStartISO)
+          .lte("last_message_at", msgDateISO)
+          .order("last_message_at", { ascending: false, nullsFirst: false })
+          .limit(5);
+        const parentTicket = selectAdminAttachTarget(
+          candidates || [],
+          adminMsgTime,
+        );
+        if (parentTicket) {
           const newRawText =
             parentTicket.raw_text +
             `\n\n[ADMIN_REPLY]\n${text}\n[/ADMIN_REPLY]`;
@@ -2664,7 +2699,7 @@ ${lines.join("\n---\n")}`;
         }
         logger.debug(
           "Ingestion",
-          "No open ticket within 90s window for unquoted admin message",
+          "No active ticket within admin-reply attach window for unquoted admin message",
         );
       } catch (err) {
         logger.error(
@@ -3139,6 +3174,86 @@ ${lines.join("\n---\n")}`;
               );
             }
           };
+          // ── Phase B: edit / delete handlers (shared) ──────────────────────
+          // One implementation called by BOTH the live Raw listener (mostly
+          // dead, harmless) and the working getChannelDifference drain, so an
+          // edited/deleted Telegram message is handled wherever it actually
+          // arrives. The decision of WHAT to pull out of a difference's
+          // otherUpdates lives in the pure channel-difference.ts.
+          async function applyMessageEdit(
+            msgId: number | string,
+            newText: string,
+          ) {
+            if (!newText) return;
+            try {
+              const supabase = getSupabase();
+              const { data: msgRow } = await supabase
+                .from("messages")
+                .update({
+                  raw_text: newText,
+                  edited_at: new Date().toISOString(),
+                })
+                .eq("telegram_message_id", String(msgId))
+                .select("id")
+                .maybeSingle();
+              // Only a ticket ROOT mirrors the edit into its raw_text; an edited
+              // follow-up just updates its messages row (the thread's appended
+              // block is left as-is — rewriting a buried block is out of scope).
+              if (msgRow) {
+                await supabase
+                  .from("tickets")
+                  .update({
+                    raw_text: newText,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("message_id", msgRow.id);
+              }
+              logger.info("Telegram", `Message ${msgId} edited - updated in DB`);
+            } catch (e) {
+              logger.warn("Telegram", "Edit handler error", { error: e.message });
+            }
+          }
+          async function applyMessageDelete(msgId: number | string) {
+            try {
+              const supabase = getSupabase();
+              const nowISO = new Date().toISOString();
+              // Soft-delete the message (auditable, reversible) — never erase it.
+              const { data: msgRow } = await supabase
+                .from("messages")
+                .update({ deleted_at: nowISO })
+                .eq("telegram_message_id", String(msgId))
+                .select("id")
+                .maybeSingle();
+              if (!msgRow) return; // never ingested → nothing to do
+              // Dismiss the ticket ONLY if this deleted message is its root, and
+              // only from an active/assumed state — a guarded conditional update
+              // (same defense as the auto-resolve sweeps) so it can never clobber
+              // an Escalated/Resolved ticket a human set. A deleted FOLLOW-UP
+              // matches no ticket here, so the parent issue is left untouched.
+              await supabase
+                .from("tickets")
+                .update({
+                  status: "Dismissed",
+                  resolved_at: nowISO,
+                  updated_at: nowISO,
+                })
+                .eq("message_id", msgRow.id)
+                .in("status", [
+                  "Open",
+                  "In Review",
+                  "Awaiting User",
+                  "Assumed Resolved",
+                ]);
+              logger.info(
+                "Telegram",
+                `Message ${msgId} deleted - soft-deleted (ticket dismissed if root)`,
+              );
+            } catch (e) {
+              logger.warn("Telegram", "Delete handler error", {
+                error: e.message,
+              });
+            }
+          }
           // ── Phase 2: getChannelDifference live ingestion ──────────────────
           // GramJS 2.26.x never syncs the supergroup's channel pts, so Telegram
           // WITHHOLDS its UpdateNewChannelMessage from the live NewMessage
@@ -3265,6 +3380,23 @@ ${lines.join("\n---\n")}`;
                         newlyIngested,
                         newPts: c.newPts,
                       },
+                    );
+                  }
+                  // Phase B: a difference's edits/deletes ride in otherUpdates,
+                  // NOT newMessages — apply them here so the working diff path
+                  // handles edited/deleted messages the dead Raw listener never
+                  // saw. The helpers are idempotent + guarded; a delete burst is
+                  // small, so the awaited loop is cheap.
+                  const { edits, deletedIds } = extractChannelEditsDeletes(
+                    c.otherUpdates,
+                  );
+                  for (const ed of edits) await applyMessageEdit(ed.id, ed.text);
+                  for (const delId of deletedIds) await applyMessageDelete(delId);
+                  if (edits.length || deletedIds.length) {
+                    logger.info(
+                      "ChannelDiff",
+                      "Applied channel edits/deletes from getChannelDifference",
+                      { edits: edits.length, deletes: deletedIds.length },
                     );
                   }
                   if (c.newPts != null) trackedChannelPts = c.newPts;
@@ -3472,67 +3604,18 @@ ${lines.join("\n---\n")}`;
               );
               return;
             }
+            // Both branches delegate to the shared helpers (defined above) so
+            // the live Raw listener and the getChannelDifference drain handle
+            // edits/deletes identically.
             if (update.className === "UpdateEditChannelMessage") {
               const msg = update.message;
               if (!msg || !msg.id || !msg.message) return;
-              try {
-                const supabase = getSupabase();
-                const { data: msgRow } = await supabase
-                  .from("messages")
-                  .update({
-                    raw_text: msg.message,
-                    edited_at: /* @__PURE__ */ new Date().toISOString(),
-                  })
-                  .eq("telegram_message_id", String(msg.id))
-                  .select("id")
-                  .single();
-                if (msgRow) {
-                  await supabase
-                    .from("tickets")
-                    .update({ raw_text: msg.message })
-                    .eq("message_id", msgRow.id);
-                }
-                logger.info(
-                  "Telegram",
-                  `Message ${msg.id} edited - updated in DB`,
-                );
-              } catch (e) {
-                logger.warn("Telegram", "Edit handler error", {
-                  error: e.message,
-                });
-              }
+              await applyMessageEdit(msg.id, msg.message);
             }
             if (update.className === "UpdateDeleteChannelMessages") {
               const deletedIds = update.messages || [];
               if (!deletedIds.length) return;
-              try {
-                const supabase = getSupabase();
-                for (const msgId of deletedIds) {
-                  const { data: msg } = await supabase
-                    .from("messages")
-                    .select("id")
-                    .eq("telegram_message_id", String(msgId))
-                    .maybeSingle();
-                  if (msg) {
-                    await supabase
-                      .from("tickets")
-                      .update({
-                        status: "Dismissed",
-                        resolved_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString(),
-                      })
-                      .eq("message_id", msg.id);
-                    logger.info(
-                      "Telegram",
-                      `Message ${msgId} deleted - ticket dismissed`,
-                    );
-                  }
-                }
-              } catch (e) {
-                logger.warn("Telegram", "Delete handler error", {
-                  error: e.message,
-                });
-              }
+              for (const msgId of deletedIds) await applyMessageDelete(msgId);
             }
           }, new Raw({}));
           // ── Research spike (live-listener): LISTENER_DEBUG ────────────────
