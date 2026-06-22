@@ -3,6 +3,7 @@ import { format, subDays, startOfDay, isToday, isYesterday, parseISO } from "dat
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from "recharts";
 import { Activity, AlertTriangle, CheckCircle, RefreshCcw, Send, Settings, User, Clock, ChevronDown, ChevronUp, Lock, ExternalLink, X } from "lucide-react";
 import { detectHandoff } from "../handoff-detect";
+import auditResults from "../audit-results.json";
 
 // -----------------------------------------------------------------------------
 // TYPES
@@ -1713,13 +1714,88 @@ export default function App() {
               {/* Header */}
               <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-bold text-white">🎯 AI Classifier Accuracy Benchmark & Sandbox</h2>
-                  <p className="text-xs text-white/40 mt-0.5">Test individual messages or evaluate 20 gold-standard labeled cases</p>
+                  <h2 className="text-base font-bold text-white">AI Accuracy &amp; Trust</h2>
+                  <p className="text-xs text-white/40 mt-0.5">Real-traffic audit · live sandbox · training loop · internal regression suite</p>
                 </div>
                 <button onClick={() => setShowBenchmark(false)} className="text-white/40 hover:text-white transition p-1 rounded-lg hover:bg-white/10">x</button>
               </div>
 
               <div className="overflow-y-auto flex-1 p-6">
+                {/* Real-Traffic Accuracy Audit — the defensible, human-judged number */}
+                {(() => {
+                  const A = auditResults as any;
+                  const tile = (
+                    label: string,
+                    value: number | null,
+                    opts: { raw?: number; goodWhenLow?: boolean } = {},
+                  ) => {
+                    const isRaw = opts.raw != null;
+                    const display = isRaw ? String(opts.raw) : value == null ? "—" : `${value}%`;
+                    const colorClass = isRaw
+                      ? "text-white/80"
+                      : value == null
+                      ? "text-white/40"
+                      : (opts.goodWhenLow ? value <= 10 : value >= 80)
+                      ? "text-emerald-400"
+                      : (opts.goodWhenLow ? value <= 25 : value >= 60)
+                      ? "text-amber-400"
+                      : "text-rose-400";
+                    return (
+                      <div key={label} className="bg-black/30 border border-white/10 rounded-lg p-3 text-center">
+                        <div className={`text-2xl font-black ${colorClass}`}>{display}</div>
+                        <div className="text-[10px] text-white/50 mt-1 leading-tight">{label}</div>
+                      </div>
+                    );
+                  };
+                  return (
+                    <div className="mb-8 bg-gradient-to-br from-emerald-500/10 to-indigo-500/10 border border-emerald-500/25 rounded-xl p-5">
+                      <div className="flex items-center justify-between gap-3 mb-1">
+                        <h3 className="text-sm font-bold text-white">Real-Traffic Accuracy Audit</h3>
+                        <span className="text-[10px] text-emerald-300/80 uppercase tracking-wider font-semibold">Human-judged · blind · real messages</span>
+                      </div>
+                      {A.agreement ? (
+                        <>
+                          <p className="text-xs text-white/50 mb-4">
+                            {A.agreement.n} real recent messages, classified by the live model, then judged{" "}
+                            <span className="text-white/70 font-medium">blind</span> by a human rater. The judge is
+                            independent of the AI — so this survives "you graded yourself."
+                          </p>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                            {tile("Category agreement", A.agreement.categoryAgreementPct)}
+                            {tile("Urgency within one level", A.agreement.urgencyWithinOnePct)}
+                            {tile("Critical/High recall", A.agreement.criticalHighRecallPct)}
+                            {tile("Messages judged", null, { raw: A.agreement.n })}
+                          </div>
+                          {(A.autoResolvePrecision || A.noiseFalseNegative || A.grouping) && (
+                            <>
+                              <div className="text-[10px] text-white/40 uppercase tracking-wider font-semibold mb-2">
+                                System-level safety (human-checked)
+                              </div>
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                {A.autoResolvePrecision && tile("Auto-resolve precision", A.autoResolvePrecision.precisionPct)}
+                                {A.noiseFalseNegative && tile("Noise false-negatives", A.noiseFalseNegative.falseNegativePct, { goodWhenLow: true })}
+                                {A.grouping?.overSplit && tile("Grouping over-split", A.grouping.overSplit.overSplitPct, { goodWhenLow: true })}
+                                {A.grouping?.overMerge && tile("Grouping over-merge", A.grouping.overMerge.overMergePct, { goodWhenLow: true })}
+                              </div>
+                            </>
+                          )}
+                          <p className="text-[10px] text-white/30 mt-3">
+                            Urgency graded "within one level" plus recall on the urgent classes (severity is subjective).
+                            Auto-resolve precision and noise false-negatives are human-judged on real tickets. Full
+                            methodology in the PulseDesk guide.
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-xs text-white/50">
+                          Audit pending — a human rater fills the blind worksheet (real recent messages), then the
+                          agreement and system-safety numbers appear here. This is the number we stand behind; the
+                          sections below are supporting evidence.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Live Sandbox Section */}
                 <div className="mb-8 bg-white/5 border border-white/10 rounded-xl p-5">
                   <h3 className="text-sm font-bold text-white mb-2">Live Testing Sandbox</h3>
@@ -1765,10 +1841,15 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="flex items-center gap-3 mb-4">
-                  <h3 className="text-sm font-bold text-white">Batch Evaluation</h3>
+                <div className="flex items-center gap-3 mb-2 mt-8">
+                  <h3 className="text-sm font-bold text-white">Internal Regression Suite</h3>
                   <div className="h-px bg-white/10 flex-1"></div>
                 </div>
+                <p className="text-xs text-white/40 mb-4">
+                  20 hand-written cases (incl. Nigerian Pidgin) that guard against prompt regressions — an engineering
+                  safety net, <span className="text-white/60">not</span> an accuracy claim. For accuracy, see the
+                  Real-Traffic Audit at the top.
+                </p>
                 {evalLoading && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
@@ -1792,9 +1873,9 @@ export default function App() {
                     {/* Score Cards */}
                     <div className="grid grid-cols-3 gap-4 mb-6">
                       {[
-                        { label: "Category Accuracy", value: evalResults.categoryAccuracy, color: evalResults.categoryAccuracy >= 80 ? "emerald" : evalResults.categoryAccuracy >= 60 ? "amber" : "rose" },
-                        { label: "Urgency Accuracy",  value: evalResults.urgencyAccuracy,  color: evalResults.urgencyAccuracy  >= 80 ? "emerald" : evalResults.urgencyAccuracy  >= 60 ? "amber" : "rose" },
-                        { label: "Overall (Both)",    value: evalResults.overallAccuracy,   color: evalResults.overallAccuracy   >= 70 ? "emerald" : evalResults.overallAccuracy   >= 50 ? "amber" : "rose" },
+                        { label: "Category pass", value: evalResults.categoryAccuracy, color: evalResults.categoryAccuracy >= 80 ? "emerald" : evalResults.categoryAccuracy >= 60 ? "amber" : "rose" },
+                        { label: "Urgency pass",  value: evalResults.urgencyAccuracy,  color: evalResults.urgencyAccuracy  >= 80 ? "emerald" : evalResults.urgencyAccuracy  >= 60 ? "amber" : "rose" },
+                        { label: "Both pass",    value: evalResults.overallAccuracy,   color: evalResults.overallAccuracy   >= 70 ? "emerald" : evalResults.overallAccuracy   >= 50 ? "amber" : "rose" },
                       ].map(s => (
                         <div key={s.label} className={`bg-${s.color}-500/10 border border-${s.color}-500/20 rounded-xl p-5 text-center`}>
                           <div className={`text-4xl font-black text-${s.color}-400`}>{s.value}%</div>
@@ -1842,21 +1923,22 @@ export default function App() {
 
                 {!evalLoading && !evalResults && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4 text-white/40">
-                    <p className="text-sm">Click "Run Benchmark" to evaluate the AI classifier against 20 known test cases.</p>
+                    <p className="text-sm">Click "Run Built-in Benchmark" below to run the 20-case regression suite (prompt-regression guard, not an accuracy claim).</p>
                   </div>
                 )}
 
                 {/* Training Loop Verification (Milestone 4) */}
                 <div className="flex items-center gap-3 mb-4 mt-8">
-                  <h3 className="text-sm font-bold text-white">Training Loop Verification</h3>
+                  <h3 className="text-sm font-bold text-white">Training Loop — does human feedback improve the AI?</h3>
                   <div className="h-px bg-white/10 flex-1"></div>
                 </div>
                 <div className="bg-white/5 border border-white/10 rounded-xl p-5">
                   <div className="flex items-start justify-between gap-4 mb-4">
                     <p className="text-xs text-white/50">
-                      Re-runs the AI on messages a human already reviewed in /train — once with no training (baseline)
-                      and once learning from past corrections. Each message's own correction is hidden from it, so it
-                      cannot cheat. If the training loop works, the second score is higher.
+                      Proves the correction loop works, not the overall accuracy. It re-runs the AI on messages a human
+                      already reviewed in /train — once with no training, once learning from past corrections (each
+                      message's own correction hidden, so it cannot cheat). The number that matters is the
+                      <span className="text-white/70 font-medium"> improvement</span>: human feedback should lift the score.
                     </p>
                     <button
                       onClick={runVerify}
@@ -1888,11 +1970,11 @@ export default function App() {
                       <div className="grid grid-cols-3 gap-4 mb-4">
                         <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-center">
                           <div className="text-3xl font-black text-white/70">{verifyState.summary.baselineAccuracy ?? "—"}%</div>
-                          <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">Baseline (no training)</div>
+                          <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">Baseline · hardest cases</div>
                         </div>
                         <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-4 text-center">
                           <div className="text-3xl font-black text-indigo-400">{verifyState.summary.fewShotAccuracy ?? "—"}%</div>
-                          <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">With training</div>
+                          <div className="text-[10px] text-white/50 mt-1 uppercase tracking-widest font-semibold">With training · hardest cases</div>
                         </div>
                         {verifyState.summary.improvementPoints >= 0 ? (
                           <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
@@ -1906,6 +1988,11 @@ export default function App() {
                           </div>
                         )}
                       </div>
+                      <p className="text-[11px] text-amber-300/70 mb-4">
+                        These percentages are measured <span className="font-semibold">only on the AI's hardest, human-corrected cases</span> —
+                        a pool deliberately enriched for what looked wrong. They are <span className="font-semibold">not</span> overall accuracy.
+                        For accuracy, see the Real-Traffic Audit at the top.
+                      </p>
                       {verifyState.summary.humanFixCases > 0 && (
                         <p className="text-xs text-white/40 mb-4">
                           On the {verifyState.summary.humanFixCases} message{verifyState.summary.humanFixCases === 1 ? "" : "s"} a human
@@ -1957,7 +2044,7 @@ export default function App() {
 
               {/* Footer */}
               <div className="px-6 py-4 border-t border-white/10 flex justify-between items-center">
-                <p className="text-xs text-white/30">Tests {evalResults?.total || 20} messages - Uses llama-3.1-8b-instant model</p>
+                <p className="text-xs text-white/30">Regression suite: {evalResults?.total || 20} cases · llama-3.1-8b-instant · raw model. Accuracy = the Real-Traffic Audit above.</p>
                 <div className="flex space-x-3">
                   <label className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-4 py-2 rounded-lg transition cursor-pointer flex items-center">
                     Upload Custom JSON
