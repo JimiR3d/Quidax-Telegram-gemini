@@ -2,6 +2,13 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## 🟢 RATE HONESTY PHASE 3 — "Handed off" disposition (2026-06-22, code+migration DONE, gate green, e2e + backfill LIVE; deploy pending this push)
+
+Full detail in the top banner of `PULSEDESK_HANDOFF.md`. Admin replies that redirect a user OFF-PLATFORM (email/DM) now move the ticket to a dedicated `Handed off` status, EXCLUDED from both the active denominator and the resolution numerator (PulseDesk can't observe an off-platform close, so it neither claims nor is penalised for it).
+- **✅ Email/DM hand-off rate drag removed.** Pure `handoff-detect.ts` (`isEmailHandoff`/`isOffPlatformHandoff`, email+DM scope), set in `reclassifyFromAdminReply` (guarded Open/In Review, `resolved_at` NOT stamped), reopens to In Review on a new user reply. Migration `020_handed_off_status` widened the status constraint + added `handedOffCount`; no JS rate change needed (`Handed off` is just absent from the active list). Backfilled 5 genuine email hand-offs preview-first; rate 45.6%→46.3%.
+- **⚠️ Known limitation:** the DM scope's code patterns are narrow (`dm me` / `drop a dm` / `in my dms` / `message me`); looser DM phrasings ("share details via DM", "to my DM") are deliberately NOT flagged to avoid false positives (a *"Do not respond to anyone in your DM"* scam-warning was caught by a broad preview query and correctly excluded). A genuinely missed DM hand-off just stays active — fail-safe.
+- **Prod-only leg:** the hand-off branch is fully e2e-verified locally; only a real admin hand-off reply over the live socket is first-exercised in prod.
+
 ## 🟢 BULLETPROOF INGESTION — admin-drop, delete handling, thread completeness (2026-06-22, code UNCOMMITTED/UNPUSHED; data backfill LIVE)
 
 Plan: `.claude/plans/nifty-watching-aurora.md`. Full detail in the top banner of `PULSEDESK_HANDOFF.md`.
