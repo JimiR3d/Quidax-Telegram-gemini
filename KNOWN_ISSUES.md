@@ -2,6 +2,17 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## 🟢 BULLETPROOF INGESTION — admin-drop, delete handling, thread completeness (2026-06-22, code UNCOMMITTED/UNPUSHED; data backfill LIVE)
+
+Plan: `.claude/plans/nifty-watching-aurora.md`. Full detail in the top banner of `PULSEDESK_HANDOFF.md`.
+- **✅ Admin replies were being DROPPED (symptom 1, FIXED in code).** Asymmetry: users got wide sender-hash attachment, admins only quoted-to-root or the 90s window → an admin answering minutes later vanished (proven on `5aec106f`). Fix: pure `admin-reply-attach.ts` + (A2) quoted-reply resolves via the quoted message's sender, (A3) un-quoted window widened to ~30 min most-recent-active. Locally verified e2e.
+- **✅ Deleted/edited messages NEVER handled (symptom 3, FIXED in code; live leg prod-only).** Edit/delete logic rode the dead Raw listener; now also wired into the working `getChannelDifference` drain via `extractChannelEditsDeletes(otherUpdates)`. Migration `018` adds `messages.deleted_at` (soft-delete + guarded root-Dismiss). **Live delivery of edit/delete updates over `otherUpdates` is unverified until deploy.**
+- **🟡 Original-message-missing (symptom 2) was RARE** (1 admin-rooted ticket left) and shares symptom-1's root (quoted a folded follow-up) — covered by A2.
+- **✅ Resolution rate (symptom 4):** dropped admin replies made ~29 Opens look unengaged → auto-resolve sweeps skipped them. Backfill (Phase C) re-attached 50 verified support replies to 19 tickets; rate 38.9% → projected ~40.9% via the enabled sweep. The earlier "~50%" was an over-estimate.
+- **🟠 OPEN — historical backfill is PARTIAL (deferred to Phase 2).** 5 multi-day tickets (`e4336ad0`, `0c72808f`, `7c36d5f4`, `c1f3954b`, `1ccffe2c`) were excluded because the support account mixes support replies with market/news chatter and time-based attribution can't separate them. Only the Phase-2 idempotent `messages→tickets` reducer keyed on **reply-to metadata** (which `messages` does NOT currently store) can attribute these reliably.
+- **🟠 LATENT RISK (NOT fixed):** `reconcileOrphanMessages` derives `adminSenderHashes` only from `is_admin_message=true` tickets (sparse post-cleanup), so a brand-new support admin's dropped replies could be resurrected by the reconcile sweep as bogus USER tickets. Mitigation idea: maintain a known-admin-hash allowlist, or have the reconcile sweep skip messages whose text matches a recently-attached `[ADMIN_REPLY]` block. Low incidence today (single long-tenured admin `7b08fcbe`).
+- **🟡 Urgency (symptom 5) untouched:** KYC/Verification = Medium by `GROQ_SYSTEM_PROMPT` design — working as written, deferred.
+
 ## 🟡 ACCURACY / BENCHMARK CREDIBILITY — Verification fixed; pitch-credible accuracy story still OPEN (2026-06-21)
 
 **Verification panel fixed (`2fdc763`), but the deeper "why should anyone trust the accuracy?" question is the next-session task.**
