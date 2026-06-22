@@ -19,7 +19,8 @@
 // is unit-tested without a DB.
 
 // Statuses a reply may attach to as ground truth. These are the ACTIVE states
-// (plus Assumed Resolved, which a fresh reply correctly reopens). Resolved and
+// (plus Assumed Resolved and Handed off, both of which a fresh reply correctly
+// reopens — see the user-reply reopen logic in server.ts). Resolved and
 // Dismissed are deliberately excluded: a reply quoting a closed-out thread should
 // fall through to the heuristic fallbacks / a new ticket, not silently revive a
 // human-closed ticket. Mirrors the status sets used at the live attach sites.
@@ -29,6 +30,7 @@ export const REPLY_ATTACH_STATUSES: readonly string[] = [
   "Escalated",
   "Awaiting User",
   "Assumed Resolved",
+  "Handed off",
 ];
 
 // Normalise a Telegram reply-to id for the `messages.reply_to_msg_id` (bigint)

@@ -27,8 +27,10 @@ import {
 import {
   parseReclassifyVerdict,
   shouldResolveFromAdminReply,
+  shouldHandOffFromAdminReply,
   AUTO_RESOLVABLE_STATUSES,
 } from "./admin-reply-resolution";
+import { isOffPlatformHandoff } from "./handoff-detect";
 import {
   recoverQuotedParent,
   type FetchedParentMessage,
@@ -1768,6 +1770,37 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
         }
       }
     }
+    // --- Phase 3: hand-off detection (takes precedence over auto-resolve) -
+    // If the admin redirected the user off-platform ("send an email to
+    // support@quidax.com" / "DM me"), the resolution happens where the listener
+    // can't see it. Move the ticket to "Handed off" — excluded from the active
+    // denominator AND the resolution numerator (we neither claim nor are
+    // penalised for an unobservable close). Same guard as auto-resolve (Open /
+    // In Review only, conditional .in update so a concurrent human change is
+    // never clobbered); resolved_at is deliberately NOT stamped (it is not a
+    // resolution). Checked FIRST so a hand-off reply is never mislabeled
+    // Resolved (a hand-off reply yields resolved=false from Groq anyway).
+    const isHandoff = isOffPlatformHandoff(adminReplyText);
+    if (shouldHandOffFromAdminReply(isHandoff, ticket.status)) {
+      const nowISO = new Date().toISOString();
+      const { data: handedRows, error: handoffErr } = await supabase
+        .from("tickets")
+        .update({ status: "Handed off", updated_at: nowISO })
+        .eq("id", ticket.id)
+        .in("status", AUTO_RESOLVABLE_STATUSES)
+        .select("id");
+      if (handoffErr) {
+        logger.error("Reclassify", "Failed to hand off ticket", {
+          ticketId: ticket.id,
+          error: handoffErr.message,
+        });
+      } else if (handedRows && handedRows.length > 0) {
+        logger.info(
+          "Reclassify",
+          `Admin reply handed off ticket ${ticket.id} (off-platform email/DM redirect)`,
+        );
+      }
+    }
     // --- Bug 4: auto-resolve on a complete, direct admin answer ----------
     // An affirmative/definitive admin reply ("Yes, you can...", "It's done")
     // closes the ticket. Guarded to active queue states (Open / In Review)
@@ -1777,7 +1810,7 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
     // the read above and this write is never clobbered — same pattern as the
     // Milestone 4 classification-race fix. resolved_at is the source of truth
     // for closure, so it is stamped here.
-    if (shouldResolveFromAdminReply(verdict.resolved, ticket.status)) {
+    else if (shouldResolveFromAdminReply(verdict.resolved, ticket.status)) {
       const nowISO = new Date().toISOString();
       const { data: resolvedRows, error: resolveErr } = await supabase
         .from("tickets")
@@ -2356,9 +2389,10 @@ ${lines.join("\n---\n")}`;
         const { data: recentTickets } = await supabase
           .from("tickets")
           .select("*")
-          // Include "Assumed Resolved" so an explicit thank-you converts a
-          // system-assumed close into a human-confirmed Resolved.
-          .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved"])
+          // Include "Assumed Resolved" / "Handed off" so an explicit thank-you
+          // converts a system-assumed close or off-platform hand-off into a
+          // human-confirmed Resolved.
+          .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved", "Handed off"])
           .eq("sender_hash", senderHash)
           .order("created_at", { ascending: false })
           .limit(1);
@@ -2636,9 +2670,10 @@ ${lines.join("\n---\n")}`;
               .from("tickets")
               .select("*")
               .eq("sender_hash", senderHash)
-              // Include "Assumed Resolved" so a returning user's reply re-finds
-              // (and reopens) a ticket the sweep auto-closed.
-              .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved"])
+              // Include "Assumed Resolved" / "Handed off" so a returning user's
+              // reply re-finds (and reopens) a ticket the sweep auto-closed or
+              // that was handed off off-platform.
+              .in("status", ["Open", "In Review", "Escalated", "Awaiting User", "Assumed Resolved", "Handed off"])
               .gte("last_message_at", fallbackCutoff)
               .order("last_message_at", { ascending: false })
               .limit(1);
@@ -2655,12 +2690,14 @@ ${lines.join("\n---\n")}`;
               parentTicket.raw_text +
               `\n\n[USER_REPLY]\n${text}\n[/USER_REPLY]`;
             // The user has responded, so a ticket parked on "Awaiting User" —
-            // or auto-closed as "Assumed Resolved" — goes back into the admin
-            // queue as "In Review". Reopening clears the assumed-close
-            // resolved_at so the ticket counts as active again.
+            // or auto-closed as "Assumed Resolved", or sent off-platform as
+            // "Handed off" — goes back into the admin queue as "In Review".
+            // Reopening clears the assumed-close resolved_at so the ticket
+            // counts as active again ("Handed off" carries no resolved_at).
             const reopens =
               parentTicket.status === "Awaiting User" ||
-              parentTicket.status === "Assumed Resolved";
+              parentTicket.status === "Assumed Resolved" ||
+              parentTicket.status === "Handed off";
             await supabase
               .from("tickets")
               .update({
@@ -4215,6 +4252,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         "Awaiting User",
         "Resolved",
         "Assumed Resolved",
+        "Handed off",
         "Dismissed",
       ];
       if (!status || !VALID_STATUSES.includes(status)) {

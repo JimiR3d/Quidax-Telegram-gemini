@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { detectHandoff, extractAdminText } from "../handoff-detect";
+import {
+  detectHandoff,
+  extractAdminText,
+  isEmailHandoff,
+  isOffPlatformHandoff,
+} from "../handoff-detect";
 
 describe("detectHandoff", () => {
   it("flags an admin email hand-off (the e374c960 live case)", () => {
@@ -51,5 +56,48 @@ describe("detectHandoff", () => {
     expect(out).toContain("admin one");
     expect(out).toContain("admin three");
     expect(out).not.toContain("user two");
+  });
+});
+
+describe("isEmailHandoff (single admin reply)", () => {
+  it("flags an email redirect", () => {
+    expect(isEmailHandoff("Send an email to support@quidax.com with your UID")).toBe(true);
+    expect(isEmailHandoff("Please send us an email")).toBe(true);
+    expect(isEmailHandoff("kindly email support")).toBe(true);
+  });
+
+  it("does NOT flag a DM redirect (email-only scope)", () => {
+    expect(isEmailHandoff("DM me your transaction receipt")).toBe(false);
+    expect(isEmailHandoff("drop a dm")).toBe(false);
+  });
+
+  it("does NOT flag a normal admin reply", () => {
+    expect(isEmailHandoff("What asset are you trying to withdraw?")).toBe(false);
+  });
+
+  it("returns false for empty / non-string input", () => {
+    expect(isEmailHandoff("")).toBe(false);
+    expect(isEmailHandoff(null as unknown as string)).toBe(false);
+  });
+});
+
+describe("isOffPlatformHandoff (single admin reply)", () => {
+  it("flags an email redirect", () => {
+    expect(isOffPlatformHandoff("Send an email to support@quidax.com")).toBe(true);
+  });
+
+  it("flags a DM redirect", () => {
+    expect(isOffPlatformHandoff("DM me your transaction receipt")).toBe(true);
+    expect(isOffPlatformHandoff("drop me a dm with the details")).toBe(true);
+    expect(isOffPlatformHandoff("message me your UID")).toBe(true);
+  });
+
+  it("does NOT flag a normal admin reply asking for more info", () => {
+    expect(isOffPlatformHandoff("When did you make the deposit?")).toBe(false);
+  });
+
+  it("returns false for empty / non-string input", () => {
+    expect(isOffPlatformHandoff("")).toBe(false);
+    expect(isOffPlatformHandoff(undefined as unknown as string)).toBe(false);
   });
 });

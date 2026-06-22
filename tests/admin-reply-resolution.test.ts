@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseReclassifyVerdict,
   shouldResolveFromAdminReply,
+  shouldHandOffFromAdminReply,
   AUTO_RESOLVABLE_STATUSES,
 } from "../admin-reply-resolution";
 
@@ -58,5 +59,30 @@ describe("shouldResolveFromAdminReply", () => {
 
   it("only Open and In Review are auto-resolvable", () => {
     expect(AUTO_RESOLVABLE_STATUSES).toEqual(["Open", "In Review"]);
+  });
+});
+
+describe("shouldHandOffFromAdminReply", () => {
+  it("hands off from an active queue state", () => {
+    expect(shouldHandOffFromAdminReply(true, "Open")).toBe(true);
+    expect(shouldHandOffFromAdminReply(true, "In Review")).toBe(true);
+  });
+
+  it("never hands off Escalated or Awaiting User (human-parked)", () => {
+    expect(shouldHandOffFromAdminReply(true, "Escalated")).toBe(false);
+    expect(shouldHandOffFromAdminReply(true, "Awaiting User")).toBe(false);
+  });
+
+  it("never re-touches terminal/closed states", () => {
+    expect(shouldHandOffFromAdminReply(true, "Resolved")).toBe(false);
+    expect(shouldHandOffFromAdminReply(true, "Dismissed")).toBe(false);
+    expect(shouldHandOffFromAdminReply(true, "Assumed Resolved")).toBe(false);
+    expect(shouldHandOffFromAdminReply(true, "Handed off")).toBe(false);
+  });
+
+  it("does nothing when the reply is not a hand-off", () => {
+    for (const s of AUTO_RESOLVABLE_STATUSES) {
+      expect(shouldHandOffFromAdminReply(false, s)).toBe(false);
+    }
   });
 });

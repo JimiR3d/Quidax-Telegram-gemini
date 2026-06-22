@@ -17,7 +17,7 @@ type Ticket = {
   sentiment: string;
   is_complaint: boolean;
   suggested_action: string;
-  status: "Open" | "In Review" | "Escalated" | "Awaiting User" | "Resolved" | "Assumed Resolved" | "Dismissed" | "Classifying";
+  status: "Open" | "In Review" | "Escalated" | "Awaiting User" | "Resolved" | "Assumed Resolved" | "Handed off" | "Dismissed" | "Classifying";
   raw_text: string;
   created_at: string;
   suggested_reply?: string | null;
@@ -53,6 +53,7 @@ const URGENCY_COLORS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   "In Review": "Admin Replied",
   "Assumed Resolved": "Likely Resolved",
+  "Handed off": "Handed Off",
 };
 const statusLabel = (s: string): string => STATUS_LABELS[s] ?? s;
 
@@ -915,10 +916,10 @@ export default function App() {
   };
 
   const KPI_TOOLTIPS: Record<string, string> = {
-    "Active Issues": "Tickets that still need attention — Open, In Review, Escalated, and Awaiting User combined. Noise categories (General Question, Praise, Spam, Irrelevant) are excluded.",
+    "Active Issues": "Tickets that still need attention — Open, In Review, Escalated, and Awaiting User combined. Noise categories (General Question, Praise, Spam, Irrelevant) are excluded, as are Handed Off tickets (sent to email/DM, where the resolution happens off-platform).",
     "In Review": "Tickets where an admin has replied but the issue isn't closed yet. Also includes Escalated and Awaiting User tickets. A new user reply on an Awaiting User ticket moves it back to In Review.",
     "Resolved": "Tickets closed as Resolved or Assumed Resolved in this period. Assumed Resolved = no new activity for 7+ days after an admin reply.",
-    "Resolution Rate": "Resolved ÷ (Resolved + Active). Dismissed tickets are not counted — they are noise/spam, not unresolved issues.",
+    "Resolution Rate": "Resolved ÷ (Resolved + Active). Dismissed and Handed Off tickets are not counted — Dismissed is noise/spam, and Handed Off resolutions happen off-platform where we can't observe them.",
     "Median Response Time": "Median time from ticket creation to the first admin reply. Uses the median rather than the mean to avoid outliers distorting the figure.",
   };
 
@@ -1185,6 +1186,7 @@ export default function App() {
                 <option value="Awaiting User">Awaiting User</option>
                 <option value="Resolved">Resolved</option>
                 <option value="Assumed Resolved">Likely Resolved</option>
+                <option value="Handed off">Handed Off</option>
                 <option value="Dismissed">Dismissed</option>
               </select>
             </div>
@@ -1427,6 +1429,7 @@ export default function App() {
                                     ticket.status === "Awaiting User" ? "bg-sky-500/10 text-sky-400 border-sky-500/20" :
                                     ticket.status === "Resolved"      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
                                     ticket.status === "Assumed Resolved" ? "bg-teal-500/10 text-teal-400 border-teal-500/20" :
+                                    ticket.status === "Handed off"    ? "bg-violet-500/10 text-violet-300 border-violet-500/20" :
                                     ticket.status === "Dismissed"     ? "bg-white/5 text-white/40 border-white/10" :
                                     "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                   }`}
@@ -1440,6 +1443,7 @@ export default function App() {
                                   <option value="Awaiting User">Awaiting User</option>
                                   <option value="Resolved">Resolved</option>
                                   <option value="Assumed Resolved">Likely Resolved</option>
+                                  <option value="Handed off">Handed Off</option>
                                   <option value="Dismissed">Dismissed</option>
                                 </select>
                               )}

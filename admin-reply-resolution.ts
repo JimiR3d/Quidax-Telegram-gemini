@@ -60,3 +60,22 @@ export function shouldResolveFromAdminReply(
 ): boolean {
   return resolved === true && AUTO_RESOLVABLE_STATUSES.includes(currentStatus);
 }
+
+// Phase 3 (2026-06-22): an admin reply that redirects the user off-platform
+// ("send an email to support@quidax.com" / "DM me") hands the ticket off — the
+// resolution then happens where the listener can't see it. We move it to the
+// "Handed off" status, which is excluded from the active denominator (neither
+// active nor counted as a resolution), so the rate stops being dragged down by
+// work PulseDesk structurally cannot observe closing.
+//
+// Guarded to the SAME active queue states as auto-resolve (Open / In Review):
+// a hand-off must NEVER un-park an Escalated / Awaiting User ticket a human set,
+// nor re-touch Resolved / Dismissed. The caller applies this as a conditional
+// DB update (WHERE status IN auto-resolvable) so a concurrent dashboard change
+// is never clobbered.
+export function shouldHandOffFromAdminReply(
+  isHandoff: boolean,
+  currentStatus: string,
+): boolean {
+  return isHandoff === true && AUTO_RESOLVABLE_STATUSES.includes(currentStatus);
+}

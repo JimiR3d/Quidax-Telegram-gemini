@@ -53,6 +53,12 @@ describe("selectReplyToTarget", () => {
     }
   });
 
+  it("accepts a Handed off ticket (a fresh reply reopens it)", () => {
+    expect(
+      selectReplyToTarget({ id: "h", status: "Handed off", is_admin_message: false })?.id,
+    ).toBe("h");
+  });
+
   it("rejects Resolved and Dismissed (closed-out threads)", () => {
     expect(
       selectReplyToTarget({ id: "x", status: "Resolved", is_admin_message: false }),

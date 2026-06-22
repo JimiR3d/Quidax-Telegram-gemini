@@ -16,15 +16,28 @@
 // already emailed support" never trips the badge. Patterns are specific (err
 // toward NOT flagging) — a false positive would hide a real open issue.
 
-const HANDOFF_PATTERNS: RegExp[] = [
+// Email redirects ("we'll handle it over email"). These are the cleanest,
+// most common hand-off — Phase 3 promotes them (plus DM) to a real "Handed off"
+// status, not just a display badge.
+export const EMAIL_HANDOFF_PATTERNS: RegExp[] = [
   /\bsend (?:us|me) an? email\b/i,
   /\bsend an email\b/i,
   /\bemail (?:us|support)\b/i,
   /support@quidax\.com/i,
+];
+
+// DM / direct-message redirects — equally off-platform (the listener only sees
+// the group), so they get the same treatment as email.
+export const DM_HANDOFF_PATTERNS: RegExp[] = [
   /\b(?:dm|message) me\b/i,
   /\bsend me a (?:dm|direct message)\b/i,
   /\bdrop (?:me )?a dm\b/i,
   /\bin my dms?\b/i,
+];
+
+const HANDOFF_PATTERNS: RegExp[] = [
+  ...EMAIL_HANDOFF_PATTERNS,
+  ...DM_HANDOFF_PATTERNS,
 ];
 
 // Pull only the [ADMIN_REPLY] ... [/ADMIN_REPLY] turns out of the thread. The
@@ -42,4 +55,24 @@ export function detectHandoff(rawText: string): boolean {
   const adminText = extractAdminText(rawText);
   if (!adminText) return false;
   return HANDOFF_PATTERNS.some((re) => re.test(adminText));
+}
+
+// --- Single-reply detectors (Phase 3) --------------------------------------
+// detectHandoff above works on a ticket's accumulated raw_text (badge). These
+// operate on ONE admin reply string — reclassifyFromAdminReply has the single
+// reply in hand, not the whole thread. Same runtime guard (non-string → false).
+
+// Email-only hand-off in a single admin reply ("send an email to
+// support@quidax.com"). The literal isEmailHandoff name the task asked for.
+export function isEmailHandoff(text: string): boolean {
+  if (typeof text !== "string" || !text) return false;
+  return EMAIL_HANDOFF_PATTERNS.some((re) => re.test(text));
+}
+
+// Any off-platform hand-off (email OR DM) in a single admin reply. This is the
+// one the server uses to set the "Handed off" status, matching the email+DM
+// scope of the display badge so status and badge never disagree.
+export function isOffPlatformHandoff(text: string): boolean {
+  if (typeof text !== "string" || !text) return false;
+  return HANDOFF_PATTERNS.some((re) => re.test(text));
 }
