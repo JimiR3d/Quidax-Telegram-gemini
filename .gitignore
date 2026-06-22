@@ -24,9 +24,17 @@ history_summary.json
 # ...except the Telegram session generator, which is a real auth utility (it is
 # .cjs because the project is "type":"module" and the script is CommonJS).
 !scripts/generate-session.cjs
+# ...and the accuracy-audit samplers, which are real methodology utilities kept
+# in the repo so the audit is reproducible (their scorers are .ts, committed).
+!scripts/audit-sample.mjs
+!scripts/audit-system.mjs
 test*.js
 fix*.js
 check*.py
 
 # Claude Code local-only settings (personal permission allowlist)
 .claude/settings.local.json
+
+# Accuracy-audit working files (real message text → kept off git; only the
+# rolled-up numbers in audit-results.json are committed)
+audit/
