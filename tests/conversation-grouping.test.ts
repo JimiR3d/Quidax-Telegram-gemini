@@ -4,6 +4,7 @@ import {
   isWithinGroupingWindow,
   groupingCutoffISO,
   groupingBand,
+  shouldBurstFold,
 } from "../conversation-grouping";
 
 // Helpers to build raw_text exactly as server.ts appends blocks.
@@ -212,5 +213,52 @@ describe("groupingBand — Phase 3 fast / extended / none classification", () =>
     expect(groupingBand(last, null, FAST_MS, WIDE_MS)).toBe("none");
     expect(groupingBand(last, "not-a-date", FAST_MS, WIDE_MS)).toBe("none");
     expect(groupingBand("", "", FAST_MS, WIDE_MS)).toBe("none");
+  });
+});
+
+describe("shouldBurstFold — Phase 2 unanswered-burst fast-fold", () => {
+  const BURST_MS = 30 * 60 * 1000; // 30 min
+  const last = "2026-06-15T12:00:00.000Z";
+  const at = (mins: number) =>
+    new Date(Date.parse(last) + mins * 60 * 1000).toISOString();
+  const open = { status: "Open", first_admin_reply_at: null };
+
+  it("folds an unanswered Open ticket within the burst window", () => {
+    expect(shouldBurstFold(open, last, at(20), BURST_MS)).toBe(true);
+  });
+
+  it("folds exactly at the burst boundary (inclusive) and a simultaneous message", () => {
+    expect(shouldBurstFold(open, last, at(30), BURST_MS)).toBe(true);
+    expect(shouldBurstFold(open, last, last, BURST_MS)).toBe(true);
+  });
+
+  it("does NOT fold past the burst window (defers to topic-shift)", () => {
+    expect(shouldBurstFold(open, last, at(31), BURST_MS)).toBe(false);
+  });
+
+  it("does NOT fold once an admin has replied", () => {
+    expect(
+      shouldBurstFold(
+        { status: "Open", first_admin_reply_at: at(5) },
+        last,
+        at(20),
+        BURST_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT fold a ticket that has moved out of Open", () => {
+    for (const status of ["In Review", "Escalated", "Awaiting User", "Resolved"]) {
+      expect(
+        shouldBurstFold({ status, first_admin_reply_at: null }, last, at(20), BURST_MS),
+      ).toBe(false);
+    }
+  });
+
+  it("is false for out-of-order (parent newer than message) and bad input", () => {
+    expect(shouldBurstFold(open, last, at(-1), BURST_MS)).toBe(false);
+    expect(shouldBurstFold(null, last, at(20), BURST_MS)).toBe(false);
+    expect(shouldBurstFold(open, null, at(20), BURST_MS)).toBe(false);
+    expect(shouldBurstFold(open, last, "not-a-date", BURST_MS)).toBe(false);
   });
 });

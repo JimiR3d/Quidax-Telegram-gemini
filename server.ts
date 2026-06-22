@@ -54,7 +54,12 @@ import {
   userThreadText,
   groupingCutoffISO,
   groupingBand,
+  shouldBurstFold,
 } from "./conversation-grouping";
+import {
+  normalizeReplyToMsgId,
+  selectReplyToTarget,
+} from "./reply-target";
 import {
   buildTopicShiftMessages,
   parseTopicShiftDecision,
@@ -94,6 +99,14 @@ const GROUPING_WINDOW_MS =
 // genuinely new issue. Default 6 hours; env-overridable.
 const GROUPING_ACTIVE_WINDOW_MS =
   Number(process.env.GROUPING_ACTIVE_WINDOW_MS) || 6 * 60 * 60 * 1000;
+// Phase 2 (reply-to attribution, 2026-06-22) — the UNANSWERED-BURST window. When
+// a candidate ticket is still unanswered (Open, no admin reply yet), a same-
+// sender un-quoted message within this window folds WITHOUT a topic-shift Groq
+// call: a user piling on a not-yet-handled issue is almost never a topic shift,
+// so the LLM round-trip (and a fragment ticket) is wasted. Sits between the fast
+// (5 min) and active (6 h) windows; default 30 min, env-overridable.
+const GROUPING_BURST_WINDOW_MS =
+  Number(process.env.GROUPING_BURST_WINDOW_MS) || 30 * 60 * 1000;
 // Phase 1 (audit 2026-06-20) — bound the quoted-reply "no parent match" fallback.
 // A user's quoted reply whose quoted parent did not resolve to a ticket used to
 // attach to the sender's most-recent active ticket REGARDLESS of age, landing a
@@ -2194,6 +2207,28 @@ ${lines.join("\n---\n")}`;
       );
     }
   }
+  // Phase 2 (reply-to attribution, 2026-06-22): stamp the durable
+  // messages.ticket_id link at EVERY attach site (root insert, admin/user reply
+  // append, grouped follow-up, user auto-resolve). This is what makes reply-to
+  // ground truth work: a later reply loads the quoted message's ticket_id and
+  // attaches there. Best-effort — a link failure must never abort ingestion (the
+  // message row and the ticket already exist); it only degrades a future reply
+  // back to the heuristic fallbacks. Idempotent (plain overwrite), safe on the
+  // reconcile path (existing messages.id).
+  async function linkMessageToTicket(supabase, messageDbId, ticketId) {
+    if (!messageDbId || !ticketId) return;
+    const { error } = await supabase
+      .from("messages")
+      .update({ ticket_id: ticketId })
+      .eq("id", messageDbId);
+    if (error) {
+      logger.warn("Ingestion", "Failed to link message to ticket", {
+        messageDbId,
+        ticketId,
+        error: error.message,
+      });
+    }
+  }
   async function processAndIngestMessage(
     text,
     telegramId,
@@ -2291,6 +2326,11 @@ ${lines.join("\n---\n")}`;
           message_timestamp: msgDateISO,
           ingested_at: /* @__PURE__ */ new Date().toISOString(),
           sender_hash: senderHash,
+          // Phase 2 (reply-to attribution): persist which message this replied to
+          // (null when not a quoted reply) so a later reply can resolve the
+          // quoted message's ticket as ground truth instead of time/sender
+          // guessing. messages.ticket_id is stamped after attach (linkMessageToTicket).
+          reply_to_msg_id: normalizeReplyToMsgId(replyToMsgId),
         })
         .select("id")
         .single();
@@ -2341,6 +2381,7 @@ ${lines.join("\n---\n")}`;
             "Ingestion",
             `User auto-resolved ticket ${parentTicket.id}`
           );
+          await linkMessageToTicket(supabase, dbMessage.id, parentTicket.id);
           return parentTicket;
         }
       } catch (err) {
@@ -2362,16 +2403,32 @@ ${lines.join("\n---\n")}`;
           let parentTicket = null;
           const { data: parentMsg } = await supabase
             .from("messages")
-            .select("id, sender_hash")
+            .select("id, sender_hash, ticket_id")
             .eq("telegram_message_id", String(replyToMsgId))
             .maybeSingle();
           if (parentMsg) {
-            const { data: pt } = await supabase
-              .from("tickets")
-              .select("*")
-              .eq("message_id", parentMsg.id)
-              .maybeSingle();
-            parentTicket = pt;
+            // Reply-to GROUND TRUTH (Phase 2, 2026-06-22): the quoted message is
+            // durably linked to a ticket (linkMessageToTicket stamped it at
+            // attach time). Attach this admin reply to THAT ticket — the
+            // authoritative thread the admin is answering — before any
+            // message_id / sender-hash heuristic. selectReplyToTarget rejects a
+            // closed/admin ticket so we then fall through to the fallbacks.
+            if (parentMsg.ticket_id) {
+              const { data: linked } = await supabase
+                .from("tickets")
+                .select("*")
+                .eq("id", parentMsg.ticket_id)
+                .maybeSingle();
+              parentTicket = selectReplyToTarget(linked);
+            }
+            if (!parentTicket) {
+              const { data: pt } = await supabase
+                .from("tickets")
+                .select("*")
+                .eq("message_id", parentMsg.id)
+                .maybeSingle();
+              parentTicket = pt;
+            }
             // A2 (2026-06-22): the quoted message IS in our DB but is not a
             // ticket ROOT — it is a folded [USER_FOLLOWUP]/[USER_REPLY] block of
             // an existing thread. Resolve that thread via the quoted message's
@@ -2501,6 +2558,7 @@ ${lines.join("\n---\n")}`;
               "Ingestion",
               `Admin reply attached to ticket ${parentTicket.id}`,
             );
+            await linkMessageToTicket(supabase, dbMessage.id, parentTicket.id);
             extractAndLearnKeywords(supabase, text).catch(() => {});
             // Fire-and-forget: idempotent because the dedup check at the
             // top of this function means each reply is processed once.
@@ -2527,17 +2585,33 @@ ${lines.join("\n---\n")}`;
         try {
           const { data: parentMsg } = await supabase
             .from("messages")
-            .select("id, raw_text")
+            .select("id, raw_text, ticket_id")
             .eq("telegram_message_id", String(replyToMsgId))
             .maybeSingle();
           let parentTicket = null;
           if (parentMsg) {
-            const { data: pt } = await supabase
-              .from("tickets")
-              .select("*")
-              .eq("message_id", parentMsg.id)
-              .maybeSingle();
-            parentTicket = pt;
+            // Reply-to GROUND TRUTH (Phase 2, 2026-06-22): the quoted message is
+            // durably linked to a ticket. Continue THAT thread before any
+            // message_id / ilike / sender-hash fallback. This is also the
+            // over-split fix: when a user answers an ADMIN's question, the quoted
+            // admin message carries the user ticket's ticket_id, so the reply
+            // folds back into the thread instead of spawning a new ticket.
+            if (parentMsg.ticket_id) {
+              const { data: linked } = await supabase
+                .from("tickets")
+                .select("*")
+                .eq("id", parentMsg.ticket_id)
+                .maybeSingle();
+              parentTicket = selectReplyToTarget(linked);
+            }
+            if (!parentTicket) {
+              const { data: pt } = await supabase
+                .from("tickets")
+                .select("*")
+                .eq("message_id", parentMsg.id)
+                .maybeSingle();
+              parentTicket = pt;
+            }
             if (!parentTicket && parentMsg.raw_text) {
               const safeText = parentMsg.raw_text.replace(/[%_]/g, "");
               const { data: potentialTickets } = await supabase
@@ -2600,6 +2674,7 @@ ${lines.join("\n---\n")}`;
               "Ingestion",
               `User attached reply to ticket ${parentTicket.id}`,
             );
+            await linkMessageToTicket(supabase, dbMessage.id, parentTicket.id);
             return parentTicket;
           }
         } catch (err) {
@@ -2684,6 +2759,7 @@ ${lines.join("\n---\n")}`;
             "Ingestion",
             `Unquoted admin reply attached to ticket ${parentTicket.id} (created within 90s window)`,
           );
+          await linkMessageToTicket(supabase, dbMessage.id, parentTicket.id);
           extractAndLearnKeywords(supabase, text).catch(() => {});
           reclassifyFromAdminReply(
             supabase,
@@ -2774,7 +2850,25 @@ ${lines.join("\n---\n")}`;
           // message continues the same issue (else topic shift → new ticket).
           let shouldFold = band === "fast";
           if (band === "extended") {
-            shouldFold = await checkSameIssueViaGroq(parentTicket, text);
+            // Phase 2 (reply-to attribution): an UNANSWERED-BURST — a same-sender
+            // message piling onto a still-Open, not-yet-replied ticket within the
+            // burst window — folds WITHOUT the topic-shift Groq call. A user
+            // adding detail to an unhandled issue is almost never a topic shift,
+            // so we save the LLM round-trip and avoid an over-split fragment.
+            // Past the burst window (or once an admin has replied) we defer to
+            // the normal topic-shift decision.
+            if (
+              shouldBurstFold(
+                parentTicket,
+                parentTicket.last_message_at,
+                msgDateISO,
+                GROUPING_BURST_WINDOW_MS,
+              )
+            ) {
+              shouldFold = true;
+            } else {
+              shouldFold = await checkSameIssueViaGroq(parentTicket, text);
+            }
           }
           if (parentTicket && shouldFold) {
             const newRawText =
@@ -2792,6 +2886,7 @@ ${lines.join("\n---\n")}`;
               "Ingestion",
               `Grouped follow-up ${telegramId} into ticket ${parentTicket.id} (same sender, ${band} band)`,
             );
+            await linkMessageToTicket(supabase, dbMessage.id, parentTicket.id);
             // Re-classify on the full user-side thread (fire-and-forget, never
             // touches status).
             reclassifyGroupedTicket(supabase, parentTicket.id).catch((e) =>
@@ -2849,6 +2944,11 @@ ${lines.join("\n---\n")}`;
     if (ticketError) {
       throw new Error(`DB Error inserting ticket: ${ticketError.message}`);
     }
+    // Phase 2 (reply-to attribution): link the root message to the ticket it just
+    // created, so a later reply quoting this root resolves the ticket as ground
+    // truth. (Note: a ticket's own message_id already points back to this row;
+    // ticket_id makes the lookup symmetric and uniform across all attach sites.)
+    await linkMessageToTicket(supabase, dbMessage.id, dbTicket.id);
     (async () => {
       // Milestone 4 race fix: while the classifier runs (~5-10s), an admin
       // reply can move this ticket to "In Review", a human can escalate it,

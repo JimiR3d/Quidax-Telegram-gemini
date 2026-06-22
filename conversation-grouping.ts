@@ -138,3 +138,37 @@ export function groupingBand(
   if (diff <= wideMs) return "extended";
   return "none";
 }
+
+// Phase 2 (reply-to attribution, 2026-06-22) — UNANSWERED-BURST fast-fold.
+// When a candidate ticket is still UNANSWERED (status "Open" with no admin reply
+// yet), a same-sender un-quoted message landing in the EXTENDED band is almost
+// certainly the same user piling on the same not-yet-handled issue — not a topic
+// shift. Folding it WITHOUT the topic-shift Groq call cuts both an LLM round-trip
+// and a fragment ticket. Once an admin has replied (first_admin_reply_at set) or
+// the ticket has moved out of Open, the conversation has structure and we defer
+// to the normal topic-shift decision instead.
+//
+// True iff: ticket exists, status === "Open", first_admin_reply_at is null, and
+// the gap (messageDate - lastMessage) is in [0, burstMs]. Any
+// missing/invalid/out-of-order timestamp is false (fail-safe: fall back to the
+// topic-shift LLM, never a blind fold). burstMs is expected to sit between the
+// fast window and the wide window (the call site's constants guarantee it).
+export interface BurstFoldTicket {
+  status?: string | null;
+  first_admin_reply_at?: string | null;
+}
+export function shouldBurstFold(
+  ticket: BurstFoldTicket | null | undefined,
+  lastMessageAtISO: string | null | undefined,
+  messageDateISO: string | null | undefined,
+  burstMs: number,
+): boolean {
+  if (!ticket) return false;
+  if (ticket.status !== "Open") return false;
+  if (ticket.first_admin_reply_at != null) return false;
+  const last = Date.parse(String(lastMessageAtISO ?? ""));
+  const msg = Date.parse(String(messageDateISO ?? ""));
+  if (Number.isNaN(last) || Number.isNaN(msg)) return false;
+  const diff = msg - last;
+  return diff >= 0 && diff <= burstMs;
+}
