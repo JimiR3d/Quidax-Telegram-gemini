@@ -1,5 +1,8 @@
 # Part 9: The Live Demo Script
 
+> **For the full video script + outreach DMs**, see [DEMO_SCRIPT.md](../../DEMO_SCRIPT.md). This guide section covers the general demo technique; the standalone file has the word-for-word scripts for each Quidax contact.
+
+
 This is your exact playbook for showing PulseDesk on screen — in a pitch to Quidax or a "show me what you built" moment in an interview. The goals: tell a clear story, never get caught by a surprise, and always have something to say while a screen loads.
 
 **The golden rule of demos:** narrate *what* you're showing and *why it matters* before you click, so even if something is slow or breaks, your words carry the story. A demo is a presentation with visuals, not a gamble on live software.
@@ -41,7 +44,7 @@ Log in.
 Open one ticket.
 > "Inside a ticket: the original message, the AI's category and urgency, a short summary, and a suggested reply the agent can tweak and send. The agent stays in control — nothing is sent automatically."
 Point at the status labels:
-> "Notice how the statuses are labelled for humans, not machines. 'Admin Replied' rather than 'In Review.' 'Likely Resolved' for the ones a time-based sweep auto-moved after 7 quiet days. And 'Handed Off' — that badge appears when the conversation shows the admin directed the user to email or DMs, so that ticket doesn't sit in the active queue counting against the team forever. All display-only; the stored value is unchanged."
+> "Notice how the statuses are labelled for humans, not machines. 'Admin Replied' rather than 'In Review.' 'Likely Resolved' for the ones a time-based sweep auto-moved after 7 quiet days. And 'Handed Off' — that badge appears when the conversation shows the admin directed the user to email or DMs. Those tickets are excluded from both the active queue AND the resolution rate — because PulseDesk structurally cannot observe a resolution that happened in a private email thread."
 
 **Step 4 — Show the Nigerian Pidgin handling (a standout).**
 If you can find or describe a Pidgin example:

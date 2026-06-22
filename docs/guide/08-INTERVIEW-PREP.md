@@ -1,5 +1,8 @@
 # Part 8: Interview Prep — Questions and Model Answers
 
+> **The narrative before all else.** In any Quidax conversation, everything connects back to one sentence: "I applied for your graduate trainee programme in January, didn't get in, and built two production tools on your live data instead — unprompted. That is how I work." See [INTERVIEW_PREP.md](../../INTERVIEW_PREP.md) for the full self-pitch with STAR stories and a complete question bank.
+
+
 This is a bank of questions you're likely to get, grouped by type, each with a model answer in *your* voice. Don't memorize them word-for-word — understand them, then say them naturally. The earlier parts give you the depth; this part gives you the delivery.
 
 A universal rule: **answer in layers.** Give a crisp one- or two-sentence answer first, then offer to go deeper ("I can walk through exactly how that works if useful"). That lets the interviewer steer, and it sounds confident rather than rambling.

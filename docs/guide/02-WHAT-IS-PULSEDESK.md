@@ -65,7 +65,7 @@ Walk through these as "the feature set":
 
 6. **Stores everything as tickets** in a database, with status, timestamps, and the full conversation thread.
 
-7. **Shows a live dashboard** with the ticket feed, filters (by category, urgency, date, search), and honest KPIs — Resolution Rate, Average Response Time, volume over time, and breakdowns by status.
+7. **Shows a live dashboard** with the ticket feed, filters (by category, urgency, date, search), and honest KPIs — Resolution Rate, Median Response Time (median, not mean, to exclude outliers), volume over time, and breakdowns by status. The dashboard uses purpose-built status labels: "Admin Replied" instead of "In Review", "Likely Resolved" instead of "Assumed Resolved", and a **"Handed Off" badge** when the admin redirected the user off-platform (email / DMs) — so those tickets are excluded from the active queue and from the resolution rate, rather than dragging it down for work that happened where the system cannot see it.
 
 8. **Learns from humans (the training loop).** When an agent corrects a label — or even just confirms it — that correction is stored and fed into future classifications, so the AI improves on the kinds of messages this community actually sends. There's a dedicated flashcard-style training screen for this.
 

@@ -38,3 +38,6 @@ check*.py
 # Accuracy-audit working files (real message text → kept off git; only the
 # rolled-up numbers in audit-results.json are committed)
 audit/
+
+# Personal pitch context (contains personal email/background details)
+PITCH_CONTEXT.md

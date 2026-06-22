@@ -2,7 +2,7 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
-## 🟢 RATE HONESTY PHASE 3 — "Handed off" disposition (2026-06-22, code+migration DONE, gate green, e2e + backfill LIVE; deploy pending this push)
+## 🟢 RATE HONESTY PHASE 3 — "Handed off" disposition (2026-06-22, DEPLOYED commit `d7be948`, prod healthy)
 
 Full detail in the top banner of `PULSEDESK_HANDOFF.md`. Admin replies that redirect a user OFF-PLATFORM (email/DM) now move the ticket to a dedicated `Handed off` status, EXCLUDED from both the active denominator and the resolution numerator (PulseDesk can't observe an off-platform close, so it neither claims nor is penalised for it).
 - **✅ Email/DM hand-off rate drag removed.** Pure `handoff-detect.ts` (`isEmailHandoff`/`isOffPlatformHandoff`, email+DM scope), set in `reclassifyFromAdminReply` (guarded Open/In Review, `resolved_at` NOT stamped), reopens to In Review on a new user reply. Migration `020_handed_off_status` widened the status constraint + added `handedOffCount`; no JS rate change needed (`Handed off` is just absent from the active list). Backfilled 5 genuine email hand-offs preview-first; rate 45.6%→46.3%.

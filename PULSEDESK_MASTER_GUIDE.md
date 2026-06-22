@@ -428,7 +428,7 @@ Walk through these as "the feature set":
 
 6. **Stores everything as tickets** in a database, with status, timestamps, and the full conversation thread.
 
-7. **Shows a live dashboard** with the ticket feed, filters (by category, urgency, date, search), and honest KPIs — Resolution Rate, Average Response Time, volume over time, and breakdowns by status.
+7. **Shows a live dashboard** with the ticket feed, filters (by category, urgency, date, search), and honest KPIs — Resolution Rate, Median Response Time (median, not mean, to exclude outliers), volume over time, and breakdowns by status. The dashboard uses purpose-built status labels: "Admin Replied" instead of "In Review", "Likely Resolved" instead of "Assumed Resolved", and a **"Handed Off" badge** when the admin redirected the user off-platform (email / DMs) — so those tickets are excluded from the active queue and from the resolution rate, rather than dragging it down for work that happened where the system cannot see it.
 
 8. **Learns from humans (the training loop).** When an agent corrects a label — or even just confirms it — that correction is stored and fed into future classifications, so the AI improves on the kinds of messages this community actually sends. There's a dedicated flashcard-style training screen for this.
 
@@ -1397,6 +1397,9 @@ Symptom → stakes → insight → cause → fix+proof. That cadence sounds seni
 You now have a stable of real war stories with evidence. **Part 8** turns these and everything else into a ready bank of interview questions and model answers.
 # Part 8: Interview Prep — Questions and Model Answers
 
+> **The narrative before all else.** In any Quidax conversation, everything connects back to one sentence: "I applied for your graduate trainee programme in January, didn't get in, and built two production tools on your live data instead — unprompted. That is how I work." See [INTERVIEW_PREP.md](../../INTERVIEW_PREP.md) for the full self-pitch with STAR stories and a complete question bank.
+
+
 This is a bank of questions you're likely to get, grouped by type, each with a model answer in *your* voice. Don't memorize them word-for-word — understand them, then say them naturally. The earlier parts give you the depth; this part gives you the delivery.
 
 A universal rule: **answer in layers.** Give a crisp one- or two-sentence answer first, then offer to go deeper ("I can walk through exactly how that works if useful"). That lets the interviewer steer, and it sounds confident rather than rambling.
@@ -1551,6 +1554,9 @@ Asking good questions signals seniority:
 You're ready for the conversation. Next, **Part 9** is the live demo script — exactly what to open and say if you're showing it on screen.
 # Part 9: The Live Demo Script
 
+> **For the full video script + outreach DMs**, see [DEMO_SCRIPT.md](../../DEMO_SCRIPT.md). This guide section covers the general demo technique; the standalone file has the word-for-word scripts for each Quidax contact.
+
+
 This is your exact playbook for showing PulseDesk on screen — in a pitch to Quidax or a "show me what you built" moment in an interview. The goals: tell a clear story, never get caught by a surprise, and always have something to say while a screen loads.
 
 **The golden rule of demos:** narrate *what* you're showing and *why it matters* before you click, so even if something is slow or breaks, your words carry the story. A demo is a presentation with visuals, not a gamble on live software.
@@ -1592,7 +1598,7 @@ Log in.
 Open one ticket.
 > "Inside a ticket: the original message, the AI's category and urgency, a short summary, and a suggested reply the agent can tweak and send. The agent stays in control — nothing is sent automatically."
 Point at the status labels:
-> "Notice how the statuses are labelled for humans, not machines. 'Admin Replied' rather than 'In Review.' 'Likely Resolved' for the ones a time-based sweep auto-moved after 7 quiet days. And 'Handed Off' — that badge appears when the conversation shows the admin directed the user to email or DMs, so that ticket doesn't sit in the active queue counting against the team forever. All display-only; the stored value is unchanged."
+> "Notice how the statuses are labelled for humans, not machines. 'Admin Replied' rather than 'In Review.' 'Likely Resolved' for the ones a time-based sweep auto-moved after 7 quiet days. And 'Handed Off' — that badge appears when the conversation shows the admin directed the user to email or DMs. Those tickets are excluded from both the active queue AND the resolution rate — because PulseDesk structurally cannot observe a resolution that happened in a private email thread."
 
 **Step 4 — Show the Nigerian Pidgin handling (a standout).**
 If you can find or describe a Pidgin example:
