@@ -397,8 +397,6 @@ export default function App() {
   const [isDemoMode, setIsDemoMode]         = useState<boolean>(false);
 
   // --- Simulator State ------------------------------------------------------------
-  const [simMessage, setSimMessage]             = useState("");
-  const [isSimulating, setIsSimulating]         = useState(false);
   const [isBackfilling, setIsBackfilling]       = useState(false);
   const [backfillStatus, setBackfillStatus]     = useState<{ message: string; isError: boolean } | null>(null);
   const [backfillLimit, setBackfillLimit]       = useState<number>(50);
@@ -667,29 +665,7 @@ export default function App() {
   const filteredTickets = useMemo(() => {
     return tickets;
   }, [tickets]);
-  // -- Simulator / Backfill --------------------------------------------------
-  const simulateIngestion = async () => {
-    if (!simMessage.trim()) return;
-    setIsSimulating(true);
-    try {
-      const res  = await apiFetch("/api/ingest", {
-        method: "POST",
-        body: JSON.stringify({ text: simMessage, telegramId: Math.floor(Math.random() * 999_999) }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setSimMessage("");
-        fetchTickets();
-      } else {
-        alert("Error ingesting: " + data.error);
-      }
-    } catch (e: any) {
-      if (e?.message !== "Failed to fetch") console.error(e);
-      alert("Failed to reach ingestion API. Make sure the backend server is running.");
-    }
-    setIsSimulating(false);
-  };
-
+  // -- Backfill --------------------------------------------------
   const handleBackfill = async () => {
     setIsBackfilling(true);
     setBackfillStatus(null);
@@ -1084,21 +1060,6 @@ export default function App() {
                   <span>Live Auto-Sync Active</span>
                 </div>
               </div>
-            </div>
-            <div className="flex space-x-3 mb-3">
-              <input
-                type="text"
-                value={simMessage}
-                onChange={e => setSimMessage(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && simulateIngestion()}
-                placeholder="Simulate a customer message (e.g. 'My withdrawal is stuck for 3 hours!')"
-                className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-indigo-500 backdrop-blur-md transition-all"
-              />
-              <button onClick={simulateIngestion} disabled={isSimulating || !simMessage.trim()}
-                className="bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-lg px-6 py-2 text-sm font-medium flex items-center transition shadow-lg shadow-indigo-500/20 border border-indigo-400/20"
-              >
-                {isSimulating ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <><Send className="w-4 h-4 mr-2" />Classify</>}
-              </button>
             </div>
             {backfillStatus && (
               <div className={`p-3 mt-4 rounded-lg text-sm flex items-center ${backfillStatus.isError ? "bg-red-500/10 text-red-400 border border-red-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"}`}>
