@@ -1176,7 +1176,7 @@ export default function App() {
 
           {/* Stats Row */}
           <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 sm:gap-6">
-            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTooltip("Active Issues")}>
                   {getKpiTitle("Active Issues")}
@@ -1187,7 +1187,7 @@ export default function App() {
                 <span className={`text-4xl font-bold ${activeCount > 0 ? "text-rose-500" : "text-rose-500/80"}`}>{activeCount}</span>
               </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-amber-400 font-semibold truncate" title={getKpiTooltip("In Review")}>
                   {getKpiTitle("In Review")}
@@ -1200,7 +1200,7 @@ export default function App() {
                 {escalatedCount} escalated · {awaitingUserCount} awaiting user
               </p>
             </div>
-            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-emerald-400 font-semibold truncate" title={getKpiTooltip("Resolved")}>
                   {getKpiTitle(filterDays === "1" ? "Resolved Today" : filterDays === "All" ? "Resolved All Time" : `Resolved (Last ${filterDays} Days)`)}
@@ -1217,7 +1217,7 @@ export default function App() {
                 </p>
               )}
             </div>
-            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold" title={getKpiTooltip("Resolution Rate")}>Resolution Rate</p>
               <div className="flex items-end justify-between w-full">
                 <span className="text-4xl font-bold">{resolutionRate}%</span>
@@ -1226,7 +1226,7 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div className="bg-white/5 border border-white/10 p-5 sm:p-6 rounded-2xl backdrop-blur-xl flex flex-col justify-between">
+            <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTooltip("Median Response Time")}>
                 {getKpiTitle("Median Response Time")}
               </p>
