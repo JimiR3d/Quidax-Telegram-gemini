@@ -135,8 +135,6 @@ npm test
 
 - [KPI_DEFINITIONS.md](KPI_DEFINITIONS.md) — every dashboard number explained with its exact formula
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full architecture diagram and design decisions
-- [DEMO_SCRIPT.md](DEMO_SCRIPT.md) — 3-minute demo video script and outreach plan
-- [INTERVIEW_PREP.md](INTERVIEW_PREP.md) — pitch narrative and STAR stories
 - [PULSEDESK_HANDOFF.md](PULSEDESK_HANDOFF.md) — engineering handoff document (full history)
 - [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — honest log of every known limitation
 - [docs/guide/](docs/guide/) — complete study guide (architecture through interview prep)
