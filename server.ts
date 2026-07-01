@@ -1663,6 +1663,9 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
   const GROQ_SYSTEM_PROMPT = `You are a ticket classifier for Quidax, a Nigerian crypto exchange (BTC, ETH, USDT, XRP, QDX). Your job is to classify user support messages accurately.
 Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Just JSON.
 
+=== OUTPUT SCHEMA (use EXACTLY these keys) ===
+{"category": "<one of the categories below>", "urgency": "<one of the urgency levels below>", "product_area": "<one of: ${VALID_PRODUCT_AREAS.join(", ")}>", "sentiment": "<one of: ${VALID_SENTIMENTS.join(", ")}>", "is_complaint": <true or false>, "suggested_action": "<one short sentence: what support should do next>", "summary": "<one short sentence summarizing the user's message>"}
+
 === CATEGORIES (pick exactly one) ===
 - "Withdrawal Issue"  - user cannot withdraw NGN or crypto, withdrawal pending/stuck/failed
 - "Deposit Issue"     - deposit not received, unconfirmed on-chain, balance not updated
