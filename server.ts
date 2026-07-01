@@ -76,6 +76,7 @@ import {
 import {
   buildResolutionMessages,
   parseResolutionDecision,
+  shouldRecheckResolution,
 } from "./conversation-resolution";
 import {
   filterReconcileCandidates,
@@ -906,6 +907,13 @@ async function startServer() {
     apiKey: process.env.GROQ_API_KEY,
     baseURL: "https://api.groq.com/openai/v1",
   });
+  // Groq deprecated llama-3.1-8b-instant (shutdown 2026-08-16, free tier);
+  // openai/gpt-oss-20b is Groq's recommended replacement, verified against the
+  // live /models endpoint AND benchmarked before the switch. Env-overridable so
+  // a bad rollout can be reverted without a code change. Free-tier budget is
+  // tighter on this model (1,000 req/day, 200K tokens/day) — batch loops and
+  // sweeps must stay bounded and spaced.
+  const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
   let genAI = null;
   if (process.env.GEMINI_API_KEY) {
     try {
@@ -1249,9 +1257,34 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
     process.env.RESOLUTION_INFER_DRY_RUN !== "false";
   const RESOLUTION_INFER_QUIET_HOURS =
     Number(process.env.RESOLUTION_INFER_QUIET_HOURS) || 24;
-  // Cap the Groq calls per sweep (each is a real free-tier request, spaced 2.1s).
-  // The interval re-runs hourly, so a cap simply spreads a one-time backlog.
+  // Cap the Groq calls per sweep (each is a real free-tier request, spaced 20s
+  // — D2 prompts are whole threads, and gpt-oss-20b's free tier is 8K
+  // tokens/min, so ~3 calls/min is the safe ceiling). The interval re-runs
+  // hourly, so a cap simply spreads a one-time backlog.
   const RESOLUTION_INFER_SWEEP_LIMIT = 40;
+  const RESOLUTION_INFER_CALL_SPACING_MS = 20e3;
+  // Per-ticket re-check cooldown (model migration, 2026-07-01): a NOT-resolved
+  // verdict used to be re-asked EVERY hourly sweep for the same unchanged
+  // thread — ruinous under gpt-oss-20b's 1K requests/day free tier. Each
+  // verdict is recorded here; shouldRecheckResolution (pure, tested) only
+  // spends a new call when the thread advanced or the cooldown elapsed.
+  // In-memory by design: a redeploy re-checks each eligible ticket once.
+  const RESOLUTION_INFER_RECHECK_MS =
+    (Number(process.env.RESOLUTION_INFER_RECHECK_HOURS) || 24) * 60 * 60 * 1e3;
+  const resolutionCheckRecords = new Map<
+    string,
+    { checkedAt: number; lastActivityMs: number }
+  >();
+  // Records older than 7 days are useless (the time sweep closes such tickets
+  // without an LLM) — prune so the map can never grow unbounded.
+  function pruneResolutionCheckRecords(nowMs) {
+    const cutoff = nowMs - 7 * 24 * 60 * 60 * 1e3;
+    for (const [id, rec] of resolutionCheckRecords) {
+      if (!Number.isFinite(rec?.checkedAt) || rec.checkedAt < cutoff) {
+        resolutionCheckRecords.delete(id);
+      }
+    }
+  }
   async function inferResolvedFromConversation() {
     try {
       if (!RESOLUTION_INFER_ENABLED) return;
@@ -1281,6 +1314,7 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
       }
       if (!rows || rows.length === 0) return;
       const now = Date.now();
+      pruneResolutionCheckRecords(now);
       const quietMs = RESOLUTION_INFER_QUIET_HOURS * 60 * 60 * 1e3;
       let checked = 0;
       let resolved = 0;
@@ -1303,8 +1337,23 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
         ) {
           continue;
         }
+        // Cooldown: skip a ticket whose unchanged thread already got a verdict
+        // recently — only new activity or an elapsed cooldown earns a new call.
+        if (
+          !shouldRecheckResolution(
+            resolutionCheckRecords.get(t.id),
+            lastActivityMs,
+            now,
+            RESOLUTION_INFER_RECHECK_MS,
+          )
+        ) {
+          continue;
+        }
         // Eligible — spend a (rate-limited) Groq call. Space free-tier calls.
-        if (checked > 0) await new Promise((r) => setTimeout(r, 2100));
+        if (checked > 0)
+          await new Promise((r) =>
+            setTimeout(r, RESOLUTION_INFER_CALL_SPACING_MS),
+          );
         checked++;
         let verdictResolved = false;
         try {
@@ -1315,7 +1364,7 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
           const response = await groqBreaker.call(() =>
             withTimeout(
               openai.chat.completions.create({
-                model: "llama-3.1-8b-instant",
+                model: GROQ_MODEL,
                 temperature: 0,
                 messages,
                 response_format: { type: "json_object" },
@@ -1327,6 +1376,13 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
           const jsonStr =
             response.choices[0]?.message?.content?.trim() || "{}";
           verdictResolved = parseResolutionDecision(jsonStr).resolved;
+          // A real verdict was obtained — start this ticket's cooldown. Error
+          // paths deliberately do NOT record (no verdict; the breaker already
+          // fast-fails a broken Groq, and the hourly retry is bounded).
+          resolutionCheckRecords.set(t.id, {
+            checkedAt: Date.now(),
+            lastActivityMs,
+          });
         } catch (e) {
           // Fail-safe: any breaker-open / timeout / parse error leaves the
           // ticket untouched (never close a live issue on an LLM hiccup).
@@ -1702,7 +1758,7 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
     const response = await groqBreaker.call(() =>
       withTimeout(
         openai.chat.completions.create({
-          model: "llama-3.1-8b-instant",
+          model: GROQ_MODEL,
           temperature: 0,
           messages: [
             { role: "system", content: RECLASSIFY_SYSTEM_PROMPT },
@@ -1860,7 +1916,7 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
       const response = await groqBreaker.call(() =>
         withTimeout(
           openai.chat.completions.create({
-            model: "llama-3.1-8b-instant",
+            model: GROQ_MODEL,
             temperature: 0,
             messages,
             response_format: { type: "json_object" },
@@ -1918,7 +1974,7 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
     const response = await groqBreaker.call(() =>
       withTimeout(
         openai.chat.completions.create({
-          model: "llama-3.1-8b-instant",
+          model: GROQ_MODEL,
           temperature: 0,
           messages: [
             { role: "system", content: GROQ_SYSTEM_PROMPT + fewShot },
@@ -3034,7 +3090,7 @@ ${lines.join("\n---\n")}`;
           const response = await groqBreaker.call(() =>
             withTimeout(
               openai.chat.completions.create({
-                model: "llama-3.1-8b-instant",
+                model: GROQ_MODEL,
                 temperature: 0,
                 messages: [
                   { role: "system", content: GROQ_SYSTEM_PROMPT + fewShot },
@@ -4449,14 +4505,18 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
     let correct = 0;
     let categoryCorrect = 0;
     let urgencyCorrect = 0;
-    // Sequential with 2.1s spacing between Groq calls (free-tier rate limits),
-    // matching the verify loop (GROQ_DELAY_MS). Never Promise.all the batch.
-    const EVAL_GROQ_DELAY_MS = 2100;
+    // Sequential spacing between Groq calls, matching the verify loop
+    // (GROQ_DELAY_MS). Never Promise.all the batch. 15s (was 2.1s under
+    // llama): gpt-oss-20b's free tier is 8K tokens/min and each eval call is
+    // ~1.5K tokens (system prompt + pidgin glossary + reasoning), so ~4
+    // calls/min is the ceiling — and this loop has no 429 retry (an error row
+    // counts as a miss). A 20-case run takes ~5 minutes.
+    const EVAL_GROQ_DELAY_MS = 15e3;
     for (const [i, gold] of GOLD_MESSAGES.entries()) {
       try {
         const response = await withTimeout(
           openai.chat.completions.create({
-            model: "llama-3.1-8b-instant",
+            model: GROQ_MODEL,
             temperature: 0,
             messages: [
               { role: "system", content: GROQ_SYSTEM_PROMPT },
@@ -4535,7 +4595,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       const response = await groqBreaker.call(() =>
         withTimeout(
           openai.chat.completions.create({
-            model: "llama-3.1-8b-instant",
+            model: GROQ_MODEL,
             temperature: 0,
             messages: [
               { role: "system", content: GROQ_SYSTEM_PROMPT + fewShot },
@@ -4794,7 +4854,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         const response = await groqBreaker.call(() =>
           withTimeout(
             openai.chat.completions.create({
-              model: "llama-3.1-8b-instant",
+              model: GROQ_MODEL,
               temperature: 0,
               messages: [
                 { role: "system", content: GROQ_SYSTEM_PROMPT + fewShot },
@@ -4817,7 +4877,12 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       (async () => {
         // Sequential with spacing between every Groq call (free-tier limits) —
         // two calls per case: raw baseline, then few-shot with leave-one-out.
-        const GROQ_DELAY_MS = 2100;
+        // 15s (was 2.1s under llama): gpt-oss-20b's free tier is 8K tokens/min
+        // and the few-shot side of each case is ~2K tokens, so ~4 calls/min is
+        // the ceiling. A 20-case run (2 calls each) takes ~10 minutes — run
+        // /api/verify sparingly; it is also a meaningful share of the 200K
+        // tokens/day budget.
+        const GROQ_DELAY_MS = 15e3;
         // One retry on a transient failure (429 / breaker-open / timeout) before
         // giving up — a rate-limit hiccup during the 40-call burst should not be
         // scored as a wrong answer; an errored case is excluded from the accuracy

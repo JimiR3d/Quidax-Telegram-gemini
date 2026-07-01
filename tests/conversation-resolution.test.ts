@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildResolutionMessages,
   parseResolutionDecision,
+  shouldRecheckResolution,
 } from "../conversation-resolution";
 
 describe("buildResolutionMessages — prompt shape", () => {
@@ -105,5 +106,86 @@ describe("parseResolutionDecision — strict true, fail-safe to false", () => {
     expect(parseResolutionDecision("")).toEqual({ resolved: false });
     expect(parseResolutionDecision("[true]")).toEqual({ resolved: false });
     expect(parseResolutionDecision("true")).toEqual({ resolved: false });
+  });
+});
+
+describe("shouldRecheckResolution — per-ticket re-check cooldown", () => {
+  const HOUR = 60 * 60 * 1e3;
+  const RECHECK = 24 * HOUR;
+  const T0 = Date.parse("2026-07-01T00:00:00Z");
+
+  it("always checks a ticket with no prior record", () => {
+    expect(shouldRecheckResolution(null, T0, T0, RECHECK)).toBe(true);
+    expect(shouldRecheckResolution(undefined, T0, T0, RECHECK)).toBe(true);
+  });
+
+  it("skips an unchanged thread inside the cooldown window", () => {
+    const prior = { checkedAt: T0, lastActivityMs: T0 - 25 * HOUR };
+    // 1 hour after the check, same last activity → the hourly sweep must skip.
+    expect(
+      shouldRecheckResolution(prior, T0 - 25 * HOUR, T0 + HOUR, RECHECK),
+    ).toBe(false);
+    // 23 hours later — still inside the 24h cooldown.
+    expect(
+      shouldRecheckResolution(prior, T0 - 25 * HOUR, T0 + 23 * HOUR, RECHECK),
+    ).toBe(false);
+  });
+
+  it("re-checks when the thread advanced since the last check", () => {
+    const prior = { checkedAt: T0, lastActivityMs: T0 - 25 * HOUR };
+    // New activity landed after the recorded lastActivityMs → new input, new call
+    // (even though the cooldown has not elapsed).
+    expect(
+      shouldRecheckResolution(prior, T0 - 2 * HOUR, T0 + HOUR, RECHECK),
+    ).toBe(true);
+  });
+
+  it("re-checks once the cooldown elapses even with no new activity", () => {
+    const prior = { checkedAt: T0, lastActivityMs: T0 - 25 * HOUR };
+    expect(
+      shouldRecheckResolution(prior, T0 - 25 * HOUR, T0 + RECHECK, RECHECK),
+    ).toBe(true);
+    expect(
+      shouldRecheckResolution(
+        prior,
+        T0 - 25 * HOUR,
+        T0 + RECHECK + HOUR,
+        RECHECK,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not re-check when activity moved BACKWARD (out-of-order ingestion)", () => {
+    const prior = { checkedAt: T0, lastActivityMs: T0 - 25 * HOUR };
+    expect(
+      shouldRecheckResolution(prior, T0 - 30 * HOUR, T0 + HOUR, RECHECK),
+    ).toBe(false);
+  });
+
+  it("fails toward checking on a malformed record", () => {
+    expect(
+      shouldRecheckResolution(
+        { checkedAt: NaN, lastActivityMs: T0 },
+        T0,
+        T0,
+        RECHECK,
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecheckResolution(
+        { checkedAt: T0, lastActivityMs: NaN },
+        T0,
+        T0,
+        RECHECK,
+      ),
+    ).toBe(true);
+  });
+
+  it("treats a non-finite incoming activity timestamp as not-advanced (cooldown still applies)", () => {
+    const prior = { checkedAt: T0, lastActivityMs: T0 - 25 * HOUR };
+    expect(shouldRecheckResolution(prior, NaN, T0 + HOUR, RECHECK)).toBe(false);
+    expect(shouldRecheckResolution(prior, NaN, T0 + RECHECK, RECHECK)).toBe(
+      true,
+    );
   });
 });

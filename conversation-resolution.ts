@@ -147,3 +147,50 @@ export function parseResolutionDecision(
   }
   return { resolved: obj.resolved === true };
 }
+
+// --- Per-ticket re-check cooldown (Groq model migration, 2026-07-01) --------
+//
+// The D2 sweep runs hourly and a NOT-resolved verdict leaves the ticket
+// eligible, so without a memory it re-asks Groq the SAME question about the
+// SAME unchanged thread every hour — ~24 wasted calls/ticket/day. That was
+// invisible under llama-3.1-8b-instant's 14.4K requests/day free tier but can
+// consume most of openai/gpt-oss-20b's 1K/day budget on its own.
+//
+// The sweep keeps an in-memory record of each ticket's last Groq verdict
+// ({checkedAt, lastActivityMs}); this pure helper decides whether a ticket has
+// earned a fresh call. Re-check when:
+//   - the ticket was never checked (no record), or the record is malformed
+//     (fail toward checking: a wasted call is recoverable, a silently frozen
+//     ticket is not); or
+//   - the thread advanced since the last check (last_message_at moved — new
+//     input can produce a new verdict); or
+//   - the cooldown elapsed (recheckMs, default 24h) — a once-a-day retry guards
+//     against a transiently wrong NOT-resolved verdict; past 7 days quiet the
+//     time sweep closes the ticket without any LLM anyway.
+// Being in-memory, a redeploy forgets the records and re-checks each eligible
+// ticket once — bounded by the sweep's 40-call cap, acceptable.
+export interface ResolutionCheckRecord {
+  // Epoch ms when the last Groq verdict for this ticket was obtained.
+  checkedAt: number;
+  // The ticket's last-activity timestamp (ms) as of that check.
+  lastActivityMs: number;
+}
+
+export function shouldRecheckResolution(
+  prior: ResolutionCheckRecord | null | undefined,
+  lastActivityMs: number,
+  nowMs: number,
+  recheckMs: number,
+): boolean {
+  if (!prior) return true;
+  if (
+    !Number.isFinite(prior.checkedAt) ||
+    !Number.isFinite(prior.lastActivityMs)
+  ) {
+    return true;
+  }
+  if (Number.isFinite(lastActivityMs) && lastActivityMs > prior.lastActivityMs) {
+    return true;
+  }
+  return Number.isFinite(nowMs) && nowMs - prior.checkedAt >= recheckMs;
+}
