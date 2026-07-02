@@ -3,17 +3,20 @@ import {
   buildResolutionMessages,
   parseResolutionDecision,
   shouldRecheckResolution,
+  RESOLUTION_RESPONSE_FORMAT,
+  isDeterministicRequestRejection,
 } from "../conversation-resolution";
 
 describe("buildResolutionMessages — prompt shape", () => {
-  it("produces a 4-turn system/user/system/assistant sequence", () => {
+  it("produces a 3-turn system/user/system sequence", () => {
     const msgs = buildResolutionMessages("a thread");
-    expect(msgs.map((m) => m.role)).toEqual([
-      "system",
-      "user",
-      "system",
-      "assistant",
-    ]);
+    expect(msgs.map((m) => m.role)).toEqual(["system", "user", "system"]);
+  });
+
+  it("never ends with an assistant prefill turn (gpt-oss answers it with a tool call — Groq 400)", () => {
+    const msgs = buildResolutionMessages("a thread");
+    expect(msgs.some((m) => m.role === "assistant")).toBe(false);
+    expect(msgs[msgs.length - 1].role).toBe("system");
   });
 
   it("keeps all user-supplied text in the role:user turn, never the system prompt", () => {
@@ -186,6 +189,103 @@ describe("shouldRecheckResolution — per-ticket re-check cooldown", () => {
     expect(shouldRecheckResolution(prior, NaN, T0 + HOUR, RECHECK)).toBe(false);
     expect(shouldRecheckResolution(prior, NaN, T0 + RECHECK, RECHECK)).toBe(
       true,
+    );
+  });
+});
+
+describe("RESOLUTION_RESPONSE_FORMAT — structured-outputs shape", () => {
+  it("is json_schema strict mode (tool-call channel cannot open)", () => {
+    expect(RESOLUTION_RESPONSE_FORMAT.type).toBe("json_schema");
+    expect(RESOLUTION_RESPONSE_FORMAT.json_schema.strict).toBe(true);
+  });
+
+  it("names the schema (Groq requires a name)", () => {
+    expect(typeof RESOLUTION_RESPONSE_FORMAT.json_schema.name).toBe("string");
+    expect(RESOLUTION_RESPONSE_FORMAT.json_schema.name.length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it("constrains output to exactly a boolean `resolved` field", () => {
+    const schema = RESOLUTION_RESPONSE_FORMAT.json_schema.schema;
+    expect(schema.type).toBe("object");
+    expect(schema.properties.resolved).toEqual({ type: "boolean" });
+    expect(schema.required).toEqual(["resolved"]);
+    expect(schema.additionalProperties).toBe(false);
+  });
+});
+
+describe("isDeterministicRequestRejection — 400s cool down, transients retry", () => {
+  it("matches the exact prod failure (400 + tool-call rejection message)", () => {
+    expect(
+      isDeterministicRequestRejection({
+        status: 400,
+        message: "400 Tool choice is none, but model called a tool",
+      }),
+    ).toBe(true);
+  });
+
+  it("matches a bare HTTP 400 wherever the SDK puts the status", () => {
+    expect(isDeterministicRequestRejection({ status: 400 })).toBe(true);
+    expect(isDeterministicRequestRejection({ code: 400 })).toBe(true);
+    expect(
+      isDeterministicRequestRejection({ response: { status: 400 } }),
+    ).toBe(true);
+  });
+
+  it("matches the tool rejection by message/code alone when the status is buried", () => {
+    expect(
+      isDeterministicRequestRejection({
+        message: "Groq request failed: tool_use_failed",
+      }),
+    ).toBe(true);
+    expect(
+      isDeterministicRequestRejection({
+        error: { code: "tool_use_failed", message: "model called a tool" },
+      }),
+    ).toBe(true);
+  });
+
+  it("never matches a 429 (quota — retry much later, not a request-shape fault)", () => {
+    expect(isDeterministicRequestRejection({ status: 429 })).toBe(false);
+    expect(
+      isDeterministicRequestRejection({
+        status: 429,
+        message: "429 Too Many Requests",
+      }),
+    ).toBe(false);
+  });
+
+  it("never matches transient 5xx / overload errors", () => {
+    expect(isDeterministicRequestRejection({ status: 503 })).toBe(false);
+    expect(
+      isDeterministicRequestRejection({
+        status: 503,
+        message: "[503 Service Unavailable] high demand",
+      }),
+    ).toBe(false);
+    expect(isDeterministicRequestRejection({ status: 500 })).toBe(false);
+  });
+
+  it("never matches our own [Timeout] / [CircuitBreaker] wrappers", () => {
+    expect(
+      isDeterministicRequestRejection(
+        new Error("[Timeout] Groq resolution-inference exceeded 15000ms"),
+      ),
+    ).toBe(false);
+    expect(
+      isDeterministicRequestRejection(
+        new Error("[CircuitBreaker] groq circuit is OPEN"),
+      ),
+    ).toBe(false);
+  });
+
+  it("fails toward retry on null/undefined/garbage errors", () => {
+    expect(isDeterministicRequestRejection(null)).toBe(false);
+    expect(isDeterministicRequestRejection(undefined)).toBe(false);
+    expect(isDeterministicRequestRejection({})).toBe(false);
+    expect(isDeterministicRequestRejection(new Error("something odd"))).toBe(
+      false,
     );
   });
 });
