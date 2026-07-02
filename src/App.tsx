@@ -45,6 +45,8 @@ const URGENCY_COLORS: Record<string, string> = {
   Medium:   "bg-indigo-500",
   Low:      "bg-blue-500",
 };
+// Order matters: rendered top-to-bottom in the urgency dropdowns.
+const URGENCY_OPTIONS = ["Critical", "High", "Medium", "Low"];
 
 // Honest, plain-English status labels (display-only — the stored DB value is
 // unchanged, so filters/KPIs are untouched). "In Review" was misleading: it only
@@ -154,6 +156,7 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
   const [submitting, setSubmitting]     = useState(false);
   const [wrongMode, setWrongMode]       = useState(false);
   const [selectedCategory, setSelectedCategory] = useState("");
+  const [selectedUrgency, setSelectedUrgency] = useState("");
   const [error, setError]               = useState("");
   const [showFullConvo, setShowFullConvo] = useState(false);
 
@@ -170,6 +173,9 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
       setCategories(data.categories || []);
       setCounts({ totalTickets: data.totalTickets || 0, correctionsLogged: data.correctionsLogged || 0 });
       setTicket(data.ticket);
+      // Defaults to the AI's urgency — leaving it untouched reads as a
+      // confirmation, changing it records an urgency correction.
+      setSelectedUrgency(data.ticket?.urgency || "");
     } catch (e: any) {
       if (e?.message !== "Unauthorized") setError(e.message);
     } finally {
@@ -191,6 +197,7 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
           ticketId: ticket.id,
           verdict,
           ...(verdict === "wrong" ? { correctCategory: selectedCategory } : {}),
+          ...(verdict !== "skip" && selectedUrgency ? { correctUrgency: selectedUrgency } : {}),
         }),
       });
       const data = await res.json();
@@ -289,8 +296,25 @@ function TrainView({ apiFetch }: { apiFetch: (endpoint: string, options?: Reques
               )}
 
               <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2">AI classified this as</p>
-              <div className="inline-flex items-center px-4 py-2 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-bold text-sm mb-6">
+              <div className="inline-flex items-center px-4 py-2 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-bold text-sm mb-5">
                 {ticket.category}
+              </div>
+
+              {/* Phase 2: urgency review. Left as-is = confirm; changed = an
+                  urgency correction, saved with the Correct/Wrong verdict. */}
+              <div className="flex items-center gap-3 mb-6">
+                <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Urgency — fix if wrong</p>
+                <select
+                  id="train-urgency-select"
+                  value={selectedUrgency}
+                  onChange={e => setSelectedUrgency(e.target.value)}
+                  disabled={submitting}
+                  className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:ring-2 focus:ring-indigo-500 [&>option]:text-black"
+                >
+                  {URGENCY_OPTIONS.map(u => (
+                    <option key={u} value={u}>{u}{u === ticket.urgency ? " (AI's pick)" : ""}</option>
+                  ))}
+                </select>
               </div>
 
               {!wrongMode ? (
@@ -634,6 +658,26 @@ export default function App() {
     } catch (e) {
       console.error(e);
       alert("Failed to update status.");
+    }
+  }, [apiFetch]);
+
+  // Phase 2: per-row urgency correction. The backend records it as a
+  // human_urgency training signal and shields it from AI reclassification.
+  const handleUpdateUrgency = useCallback(async (ticketId: string, newUrgency: string) => {
+    try {
+      const res = await apiFetch(`/api/tickets/${ticketId}/urgency`, {
+        method: "POST",
+        body: JSON.stringify({ urgency: newUrgency }),
+      });
+      if (res.ok) {
+        setTickets(prev => prev.map(t => t.id === ticketId ? { ...t, urgency: newUrgency as any } : t));
+      } else {
+        const err = await res.json();
+        alert(`Failed to update urgency: ${err.error}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to update urgency.");
     }
   }, [apiFetch]);
 
@@ -1410,7 +1454,16 @@ export default function App() {
                               )}
                             </td>
                             <td className="px-5 py-4">
-                              <span className={`text-[10px] px-2 py-0.5 rounded text-white font-bold uppercase ${URGENCY_COLORS[ticket.urgency] || "bg-white/20"}`}>{ticket.urgency}</span>
+                              <select
+                                className={`text-[10px] px-2 py-0.5 rounded text-white font-bold uppercase outline-none border-0 appearance-none cursor-pointer [&>option]:text-black ${URGENCY_COLORS[ticket.urgency] || "bg-white/20"}`}
+                                value={ticket.urgency}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => handleUpdateUrgency(ticket.id, e.target.value)}
+                              >
+                                {URGENCY_OPTIONS.map(u => (
+                                  <option key={u} value={u}>{u}</option>
+                                ))}
+                              </select>
                             </td>
                             <td className="px-5 py-4 font-medium text-white/90">
                               <div className="flex items-center gap-2 flex-wrap">
