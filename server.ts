@@ -69,6 +69,12 @@ import {
 import { resolveConnectDelayMs } from "./deploy-overlap";
 import { isBanterNoise } from "./noise-prefilter";
 import {
+  shouldPreserveHumanUrgency,
+  buildGroupedUpdatePayload,
+  dedupeAndMergeCorrections,
+  correctionFewShotLine,
+} from "./urgency-correction";
+import {
   shouldAssumeResolved,
   ASSUME_RESOLVABLE_STATUSES,
   ASSUMED_RESOLVED_QUIET_DAYS,
@@ -2009,19 +2015,43 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
       isResolution: false,
       isPreFiltered: false,
     });
+    // Phase 2 (manual urgency correction): a human-set urgency must survive
+    // reclassification — dashboard human_urgency rows always, /train human_ui
+    // rows only when the reviewer actively changed the value. Fail-safe: if
+    // the corrections lookup errors, preserve (never clobber).
+    const { data: urgencyRows, error: urgencyErr } = await supabase
+      .from("corrections")
+      .select("correction_source, original_urgency, correct_urgency")
+      .eq("ticket_id", ticketId)
+      .in("correction_source", ["human_ui", "human_urgency"])
+      .not("correct_urgency", "is", null);
+    const preserveUrgency = urgencyErr
+      ? true
+      : shouldPreserveHumanUrgency(urgencyRows || []);
+    if (preserveUrgency) {
+      logger.info(
+        "Reclassify",
+        `Preserving human-set urgency on grouped ticket ${ticketId}`,
+      );
+    }
     const { error: updateError } = await supabase
       .from("tickets")
-      .update({
-        summary: outcome.summary,
-        category: ticketData.category,
-        urgency: outcome.urgency,
-        product_area: ticketData.product_area,
-        sentiment: ticketData.sentiment,
-        is_complaint: ticketData.is_complaint,
-        suggested_action: ticketData.suggested_action,
-        suggested_reply: suggestedReply || null,
-        updated_at: new Date().toISOString(),
-      })
+      .update(
+        buildGroupedUpdatePayload(
+          {
+            summary: outcome.summary,
+            category: ticketData.category,
+            urgency: outcome.urgency,
+            product_area: ticketData.product_area,
+            sentiment: ticketData.sentiment,
+            is_complaint: ticketData.is_complaint,
+            suggested_action: ticketData.suggested_action,
+            suggested_reply: suggestedReply || null,
+          },
+          preserveUrgency,
+          new Date().toISOString(),
+        ),
+      )
       .eq("id", ticketId);
     if (updateError) {
       logger.error(
@@ -2062,24 +2092,27 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
       if (keywords.length === 0) return "";
       const { data: rows, error } = await supabase
         .from("corrections")
-        .select("message_text, original_category, correct_category")
+        .select(
+          "message_text, original_category, correct_category, correction_source, original_urgency, correct_urgency",
+        )
         // human_skip rows are "leave this one out" decisions, not teaching
         // examples — never inject them as few-shot corrections.
         .neq("correction_source", "human_skip")
         .order("created_at", { ascending: false })
         .limit(200);
       if (error || !rows || rows.length === 0) return "";
-      // Newest-first dedupe: a ticket corrected twice should only contribute
-      // its latest verdict.
-      const seen = new Set();
+      // Leave-one-out for /api/verify: the message being verified must not
+      // see its own stored answer, or the accuracy number would be a lie.
+      const candidateRows =
+        excludeMessageText === null
+          ? rows
+          : rows.filter((r) => r.message_text !== excludeMessageText);
+      // Phase 2: newest-first MERGE-dedupe — a later urgency-only correction
+      // must never shadow an earlier category correction for the same message
+      // (each signal comes from the newest row that carries it).
+      const merged = dedupeAndMergeCorrections(candidateRows);
       const scored = [];
-      for (const r of rows) {
-        // Leave-one-out for /api/verify: the message being verified must not
-        // see its own stored answer, or the accuracy number would be a lie.
-        if (excludeMessageText !== null && r.message_text === excludeMessageText)
-          continue;
-        if (seen.has(r.message_text)) continue;
-        seen.add(r.message_text);
+      for (const r of merged) {
         const haystack = String(r.message_text).toLowerCase();
         let score = 0;
         for (const kw of keywords) if (haystack.includes(kw)) score++;
@@ -2090,9 +2123,7 @@ Respond ONLY with raw JSON: {"category": "<one of the valid categories>", "resol
       if (top.length === 0) return "";
       const lines = top.map((r) => {
         const msg = redactPII(sanitizeForPrompt(r.message_text)).slice(0, 200);
-        return r.original_category === r.correct_category
-          ? `Message: "${msg}"\nCorrect category (human-confirmed): ${r.correct_category}`
-          : `Message: "${msg}"\nCorrect category: ${r.correct_category} (the AI previously chose "${r.original_category}" and a human corrected it)`;
+        return correctionFewShotLine(r, msg);
       });
       logger.info(
         "FewShot",
@@ -4375,6 +4406,72 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       return res.status(500).json({ error: "An internal error occurred." });
     }
   });
+  // Phase 2 (manual urgency correction): the dashboard's per-row urgency
+  // dropdown. Records the change as a `human_urgency` corrections row (an
+  // urgency training signal + the reclassify guard's evidence) and then
+  // updates the ticket. The category columns on that row are placeholders
+  // (original = correct) — the category was NOT reviewed here, so /train will
+  // still offer this ticket.
+  app.post("/api/tickets/:id/urgency", requireAuth, async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const user = req.user;
+      const ticketId = req.params.id;
+      const { urgency } = req.body;
+      if (!urgency || !VALID_URGENCIES.includes(urgency)) {
+        return res.status(400).json({
+          error: `Invalid urgency. Must be one of: ${VALID_URGENCIES.join(", ")}`,
+        });
+      }
+      const { data: oldTicket, error: lookupError } = await supabase
+        .from("tickets")
+        .select("*")
+        .eq("id", ticketId)
+        .single();
+      if (lookupError) throw lookupError;
+      if (user.role !== "super_admin" && oldTicket.group_id !== user.tenantId) {
+        return res
+          .status(403)
+          .json({ error: "Forbidden. Ticket belongs to another tenant." });
+      }
+      // No-op short-circuit: re-selecting the current value must not write a
+      // junk "a human set this" corrections row.
+      if (oldTicket.urgency === urgency) {
+        return res.json({ success: true, unchanged: true });
+      }
+      // Corrections row FIRST (same order as /train): the guard's evidence
+      // exists before the ticket changes.
+      const { error: insertError } = await supabase.from("corrections").insert({
+        ticket_id: oldTicket.id,
+        message_text: userThreadText(oldTicket.raw_text),
+        original_category: oldTicket.category,
+        correct_category: oldTicket.category,
+        corrected_by: user.userId || "dashboard_admin",
+        correction_source: "human_urgency",
+        original_urgency: oldTicket.urgency,
+        correct_urgency: urgency,
+      });
+      if (insertError) throw new Error(insertError.message);
+      const { error: updateError } = await supabase
+        .from("tickets")
+        .update({ urgency, updated_at: new Date().toISOString() })
+        .eq("id", ticketId);
+      if (updateError) throw updateError;
+      logAuditAction(
+        supabase,
+        user.userId,
+        "UPDATE_TICKET_URGENCY",
+        `ticket:${ticketId}`,
+        { urgency: oldTicket.urgency },
+        { urgency },
+        req.ip || "unknown",
+      );
+      res.json({ success: true });
+    } catch (e) {
+      logger.error("API", `POST /api/tickets/:id/urgency error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
+    }
+  });
   app.post("/api/tickets/:id/jira", requireAuth, async (req, res) => {
     if (!process.env.JIRA_BASE_URL) {
       return res
@@ -4650,7 +4747,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           .in(
             "ticket_id",
             batch.map((t) => t.id),
-          );
+          )
+          // Phase 2: a dashboard urgency change (human_urgency) is NOT a
+          // category review — it must not hide the ticket from this queue.
+          .neq("correction_source", "human_urgency");
         if (corrError) throw new Error(corrError.message);
         const reviewedSet = new Set((reviewed || []).map((r) => r.ticket_id));
         nextTicket = batch.find((t) => !reviewedSet.has(t.id)) || null;
@@ -4661,6 +4761,8 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         .select("id", { count: "exact", head: true })
         .eq("is_admin_message", false)
         .neq("summary", "Processing message...");
+      // Counts every corrections row (incl. admin_reply and human_urgency) —
+      // a rough "training signals collected" number, not a reviewed-count.
       const { count: correctionsLogged } = await supabase
         .from("corrections")
         .select("id", { count: "exact", head: true });
@@ -4691,6 +4793,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
     ticketId: z.string().uuid(),
     verdict: z.enum(["correct", "wrong", "skip"]),
     correctCategory: z.enum(VALID_CATEGORIES).optional(),
+    correctUrgency: z.enum(VALID_URGENCIES).optional(),
   });
   app.post("/api/train/correct", requireAuth, async (req, res) => {
     try {
@@ -4698,7 +4801,8 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid request body" });
       }
-      const { ticketId, verdict, correctCategory } = parsed.data;
+      const { ticketId, verdict, correctCategory, correctUrgency } =
+        parsed.data;
       if (verdict === "wrong" && !correctCategory) {
         return res
           .status(400)
@@ -4708,7 +4812,7 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       const supabase = getSupabase();
       const { data: ticket } = await supabase
         .from("tickets")
-        .select("id, category, raw_text, is_admin_message")
+        .select("id, category, urgency, raw_text, is_admin_message")
         .eq("id", ticketId)
         .maybeSingle();
       if (!ticket || ticket.is_admin_message) {
@@ -4732,6 +4836,12 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       // while still marking the ticket reviewed (drops out of the /train queue).
       const finalCategory =
         verdict === "wrong" ? correctCategory : ticket.category;
+      // Phase 2: a skip records no urgency judgment (NULL/NULL). A review
+      // stamps the current urgency as original and the (possibly untouched)
+      // dropdown choice as correct — original === correct reads as a
+      // human-CONFIRMED urgency in few-shot, while only an ACTIVE change
+      // counts as "human-set" for the reclassify guard.
+      const finalUrgency = isSkip ? null : correctUrgency ?? ticket.urgency;
       const { error: insertError } = await supabase.from("corrections").insert({
         ticket_id: ticket.id,
         message_text: userThreadText(ticket.raw_text),
@@ -4739,6 +4849,8 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         correct_category: finalCategory,
         corrected_by: req.user.userId || "dashboard_admin",
         correction_source: isSkip ? "human_skip" : "human_ui",
+        original_urgency: isSkip ? null : ticket.urgency,
+        correct_urgency: finalUrgency,
       });
       if (insertError) throw new Error(insertError.message);
       if (verdict === "wrong" && finalCategory !== ticket.category) {
@@ -4757,6 +4869,27 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           ticket.id,
           { category: ticket.category },
           { category: finalCategory },
+          req.ip,
+        );
+      }
+      // Phase 2: an urgency fix applies on BOTH "correct" and "wrong" verdicts
+      // (a reviewer can confirm the category while fixing the urgency).
+      if (!isSkip && finalUrgency !== ticket.urgency) {
+        const { error: urgencyUpdateError } = await supabase
+          .from("tickets")
+          .update({
+            urgency: finalUrgency,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", ticket.id);
+        if (urgencyUpdateError) throw new Error(urgencyUpdateError.message);
+        logAuditAction(
+          supabase,
+          req.user.userId || "dashboard_admin",
+          "ticket.urgency_corrected",
+          ticket.id,
+          { urgency: ticket.urgency },
+          { urgency: finalUrgency },
           req.ip,
         );
       }
