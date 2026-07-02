@@ -2,6 +2,20 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## 🟢 GROQ MODEL MIGRATION — llama-3.1-8b-instant → openai/gpt-oss-20b (2026-07-02, commits `81f9d6f`+`07fc427`, PUSH/DEPLOY PENDING)
+
+Groq decommissions `llama-3.1-8b-instant` on **2026-08-16** (free tier). Migrated all 8 call sites to a single env-overridable `GROQ_MODEL` constant defaulting to `openai/gpt-oss-20b`. Benchmark 100/95/95 (= llama baseline, deterministic ×2); every strict parser verified live; D2 sweep gained a per-ticket re-check cooldown and eval/verify spacing widened for the 14× smaller daily request budget. Bonus: restored the lost output-field list in `GROQ_SYSTEM_PROMPT` (101/102 recent tickets had fallback "User inquiry" summaries). Full detail in the `PULSEDESK_HANDOFF.md` top banner.
+- **⏭️ PENDING:** push + Railway deploy (the push was held for explicit user go), then prod verification: `/api/health` commit, first live classifications with real summaries, no 429/404 in logs.
+
+## 🟡 FULL-SYSTEM AUDIT FINDINGS (2026-07-02, read-only audit; plan `sparkling-wibbling-moonbeam`) — approved follow-up phases
+
+Audited ingestion, classification, status machine, resolution rate, threads, Dismissed handling, and the training loop against code + live DB + live Groq API. Sound (verified, leave alone): the 4-path ingestion architecture, all status-machine guards, the resolution-rate formula (live ≈54%, honest), thread assembly post reply-to, /api/eval-vs-few-shot separation. The June 25/28 "Withdrawal/High → Dismissed" cases were the **delete handler working as designed** (users deleted their own messages) — this also proved the Phase-B edit/delete live leg works in prod.
+
+**Approved, not yet built (user sign-off 2026-07-02):**
+1. **Phase 2 — manual urgency correction** (dashboard per-row dropdown + /train field; corrections-table migration `021` adding nullable `original_urgency`/`correct_urgency`; guard so `reclassifyGroupedTicket` never clobbers a human-set urgency; few-shot gains urgency lines).
+2. **Phase 3 — taxonomy + urgency criteria (ONE re-baseline event):** new "Community Chat" category (greetings/banter out of Spam/Irrelevant; ripples: prompt, Zod, `tickets_stats` migration `022`, both sweep filters, /train, App.tsx, benchmark cases); urgency-criteria rework (fragments cap at Medium; "money lost" needs a described failing transaction for Critical; fixes the deterministic "platform down → Low" benchmark miss); fresh Critical lands as **Open** (today: "In Review" + `[ESCALATED]` prefix, which the dashboard shows as "Admin Replied" — dishonest for an untouched ticket).
+3. **Phase 4 — cheap hardening:** add "refund" to `ISSUE_SIGNALS`; a Dismissed-audit surface (list Dismissed tickets carrying actionable keywords — the active net for the worst failure class; found "Pls do a refund" pre-filtered to Dismissed); `ADMIN_SENDER_HASHES` allowlist for the reconcile sweep's known latent risk; add `is_admin_message = false` filter to `tickets_stats` (1 admin-rooted Resolved ticket inflates resolvedCount by ~0.2pts — fold into migration 022); delete the dead `GROQ_SCHEMA` block; a status-machine state diagram in ARCHITECTURE.md.
+
 ## 🟢 RATE HONESTY PHASE 3 — "Handed off" disposition (2026-06-22, DEPLOYED commit `d7be948`, prod healthy)
 
 Full detail in the top banner of `PULSEDESK_HANDOFF.md`. Admin replies that redirect a user OFF-PLATFORM (email/DM) now move the ticket to a dedicated `Handed off` status, EXCLUDED from both the active denominator and the resolution numerator (PulseDesk can't observe an off-platform close, so it neither claims nor is penalised for it).
