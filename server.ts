@@ -83,6 +83,8 @@ import {
   buildResolutionMessages,
   parseResolutionDecision,
   shouldRecheckResolution,
+  RESOLUTION_RESPONSE_FORMAT,
+  isDeterministicRequestRejection,
 } from "./conversation-resolution";
 import {
   filterReconcileCandidates,
@@ -1373,7 +1375,10 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
                 model: GROQ_MODEL,
                 temperature: 0,
                 messages,
-                response_format: { type: "json_object" },
+                // Structured outputs guarantee the { resolved: boolean }
+                // shape. The tool-call 400 fix itself is the removed
+                // assistant prefill in buildResolutionMessages.
+                response_format: RESOLUTION_RESPONSE_FORMAT,
               }),
               15e3,
               "Groq resolution-inference",
@@ -1382,9 +1387,10 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
           const jsonStr =
             response.choices[0]?.message?.content?.trim() || "{}";
           verdictResolved = parseResolutionDecision(jsonStr).resolved;
-          // A real verdict was obtained — start this ticket's cooldown. Error
-          // paths deliberately do NOT record (no verdict; the breaker already
-          // fast-fails a broken Groq, and the hourly retry is bounded).
+          // A real verdict was obtained — start this ticket's cooldown.
+          // Transient error paths deliberately do NOT record (no verdict; the
+          // breaker already fast-fails a broken Groq, and the hourly retry is
+          // bounded) — but a deterministic 400 rejection DOES (see catch).
           resolutionCheckRecords.set(t.id, {
             checkedAt: Date.now(),
             lastActivityMs,
@@ -1395,8 +1401,18 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
           logger.warn(
             "ResolutionInfer",
             `Groq check failed for ${t.id} - leaving ticket open`,
-            { error: e?.message },
+            describeLLMError(e),
           );
+          // A deterministic request rejection (HTTP 400 / tool_use_failed)
+          // fails identically on every retry of the same thread — record the
+          // normal cooldown so it re-burns at most once per
+          // RESOLUTION_INFER_RECHECK_MS instead of every hourly sweep.
+          if (isDeterministicRequestRejection(e)) {
+            resolutionCheckRecords.set(t.id, {
+              checkedAt: Date.now(),
+              lastActivityMs,
+            });
+          }
           continue;
         }
         if (!verdictResolved) continue;
