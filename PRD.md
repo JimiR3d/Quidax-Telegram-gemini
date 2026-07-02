@@ -30,12 +30,13 @@ Quidax (a leading Nigerian crypto exchange) manages highly active Telegram commu
 *   **Priority:** High
 
 ### Feature 2: Human Feedback and Training Loop
-*   **Description:** A dedicated, flashcard-style training interface where admins review and correct AI classifications.
-*   **User Story:** As an admin, I want to review recent tickets and correct the AI when it mislabels a message, so the system gets smarter over time.
+*   **Description:** A dedicated, flashcard-style training interface where admins review and correct AI classifications — both the category and, since Phase 2 (2026-07-02), the urgency. The dashboard also has a per-row urgency dropdown for quick fixes outside the training flow.
+*   **User Story:** As an admin, I want to review recent tickets and correct the AI when it mislabels a message or misjudges its urgency, so the system gets smarter over time.
 *   **Acceptance Criteria:**
     *   Separate UI view for training.
     *   Corrections are stored in a dedicated reference DB table.
     *   A "Verify" function re-runs the AI on corrected tickets to measure accuracy improvements.
+    *   Urgency corrections (training page or dashboard dropdown) feed the AI's learning examples, and the AI never overwrites an urgency a human deliberately set.
 *   **Priority:** High
 
 ### Feature 3: Admin Reply Learning

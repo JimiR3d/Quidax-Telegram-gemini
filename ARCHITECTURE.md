@@ -196,7 +196,8 @@ messages
 
 corrections
   ticket_id, message_text, original_category, correct_category,
-  correction_source ('human_ui' | 'admin_reply' | 'human_skip'),
+  correction_source ('human_ui' | 'admin_reply' | 'human_skip' | 'human_urgency'),
+  original_urgency, correct_urgency,   -- nullable; NULL = urgency not reviewed (migration 021)
   corrected_by, created_at
 
 bot_replies
