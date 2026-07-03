@@ -12,11 +12,18 @@
  * there's no separate AI key to hide). audit-score-system.ts rolls the verdicts
  * into precision / false-negative / grouping rates.
  *
- * Outputs (gitignored audit/ dir):
- *   audit/system_autoresolve.json   34 Assumed Resolved + 15 human-Resolved control
- *   audit/system_noise.json         6 actionable-category Dismissed + 114 banter sample
- *   audit/system_folds.json         all tickets carrying a [USER_FOLLOWUP] block
- *   audit/system_splits.json        all same-sender clusters (>=2 active tickets <6h apart)
+ * Outputs (gitignored audit/ dir) — trimmed 2026-07-03 to a ratable ~120 rows
+ * total (the Jun-21 volume stalled the rating; caps are env-overridable below).
+ * ALL Assumed Resolved and ALL actionable-category Dismissed are still audited
+ * 100% — the caps only shrink the control/banter samples and grouping lists:
+ *   audit/system_autoresolve.json   ALL Assumed Resolved + human-Resolved control
+ *   audit/system_noise.json         ALL actionable-category Dismissed + banter sample
+ *   audit/system_folds.json         most recent tickets carrying a [USER_FOLLOWUP] block
+ *   audit/system_splits.json        most recent same-sender clusters (>=2 active <6h apart)
+ *
+ * Taxonomy note (2026-07-03): "Community Chat" is the benign-banter category
+ * (scams stay in Spam/Irrelevant) — both land in the banter lane here; the
+ * ACTIONABLE set is unchanged.
  *
  * Run:  node -r dotenv/config scripts/audit-system.mjs
  */
@@ -38,6 +45,15 @@ const ACTIONABLE = new Set([
   "App Bug", "Fee Complaint", "Account Access", "Network/Downtime",
 ]);
 const DAY = 24 * 60 * 60 * 1000;
+
+// Rating-load caps (2026-07-03). Only samples/lists are capped — the two
+// 100%-audited populations (Assumed Resolved, actionable-category Dismissed)
+// are never truncated.
+const intEnv = (name, dflt) => parseInt(process.env[name] || "", 10) || dflt;
+const CONTROL_N = intEnv("AUDIT_CONTROL_N", 10); // human-Resolved control rows
+const BANTER_SAMPLE_N = intEnv("AUDIT_BANTER_SAMPLE", 40); // was 114
+const FOLDS_CAP = intEnv("AUDIT_FOLDS_CAP", 20); // most recent folds
+const SPLITS_CAP = intEnv("AUDIT_SPLITS_CAP", 10); // most recent clusters
 
 function extractOriginal(rawText) {
   let t = String(rawText || "").replace(/^\s*\[NEEDS REVIEW\]\s*/i, "");
@@ -66,7 +82,7 @@ async function autoResolve() {
     .select("id, category, urgency, status, raw_text, resolved_at, last_message_at, created_at")
     .eq("status", "Resolved")
     .order("resolved_at", { ascending: false, nullsFirst: false })
-    .limit(15);
+    .limit(CONTROL_N);
   if (e2) throw new Error("resolved: " + e2.message);
 
   const rows = [];
@@ -98,7 +114,7 @@ async function noise() {
     if (!msg) continue;
     (ACTIONABLE.has(t.category) ? risk : bank).push({ ticketId: t.id, category: t.category, message: msg.slice(0, 1200) });
   }
-  const sample = shuffle(bank).slice(0, 114);
+  const sample = shuffle(bank).slice(0, BANTER_SAMPLE_N);
   const rows = shuffle([
     ...risk.map((r) => ({ ...r, lane: "actionable-category (FN risk)" })),
     ...sample.map((r) => ({ ...r, lane: "banter lane (random sample)" })),
@@ -113,11 +129,12 @@ async function folds() {
     .from("tickets")
     .select("id, category, raw_text, last_message_at")
     .like("raw_text", "%[USER_FOLLOWUP]%")
-    .order("last_message_at", { ascending: false });
+    .order("last_message_at", { ascending: false })
+    .limit(FOLDS_CAP);
   if (error) throw new Error("folds: " + error.message);
   const rows = (data || []).map((t) => ({ ticketId: t.id, category: t.category, thread: String(t.raw_text || "").slice(0, 6000) }));
   write("system_folds.json", rows);
-  console.log(`  grouping folds: ${rows.length}`);
+  console.log(`  grouping folds: ${rows.length} (most recent, cap ${FOLDS_CAP})`);
 }
 
 async function splits() {
@@ -144,6 +161,13 @@ async function splits() {
     }
     flush();
   }
+  // Most recent clusters first (by the cluster's newest ticket), capped.
+  clusters.sort(
+    (a, b) =>
+      Date.parse(b.tickets[b.tickets.length - 1].created_at) -
+      Date.parse(a.tickets[a.tickets.length - 1].created_at),
+  );
+  clusters.length = Math.min(clusters.length, SPLITS_CAP);
   const rows = clusters.map((c, i) => ({
     clusterId: i + 1,
     senderShort: c.hash.slice(0, 8),
@@ -153,7 +177,7 @@ async function splits() {
       .join("\n\n"),
   }));
   write("system_splits.json", rows);
-  console.log(`  grouping split-clusters: ${rows.length}`);
+  console.log(`  grouping split-clusters: ${rows.length} (most recent, cap ${SPLITS_CAP})`);
 }
 
 async function main() {
