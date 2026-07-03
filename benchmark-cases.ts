@@ -17,6 +17,12 @@
  * Cases 19-20 are feature-existence / capability questions (Bug 4b) that must
  * classify as General Question, not a problem category; the disambiguation
  * lives in GROQ_SYSTEM_PROMPT (server.ts), this file only measures the result.
+ * Cases 21-24 are the Phase-3 re-baseline additions (2026-07-02): the
+ * Community Chat / Spam split (21-22) and the reworked urgency criteria
+ * (23: context-free fragments cap at Medium; 24: a vague compromise claim
+ * with no funds described is High, not Critical). Case 4's expected category
+ * moved Spam/Irrelevant → Community Chat in the same event. Numbers from
+ * 20-case runs are NOT comparable to 24-case runs.
  *
  * Every `expectedCategory` must stay within VALID_CATEGORIES and every
  * `expectedUrgency` within VALID_URGENCIES in server.ts; tests/benchmark-cases.test.ts
@@ -62,9 +68,9 @@ export const BENCHMARK_CASES: BenchmarkCase[] = [
   },
   {
     id: 4,
-    description: "Spam/chatter - should filter",
+    description: "Community chat - greeting, should route to the noise lane",
     message: "gm everyone hope we all have a great day ☀️",
-    expectedCategory: "Spam/Irrelevant",
+    expectedCategory: "Community Chat",
     expectedUrgency: "Low",
     expectedIsComplaint: false,
   },
@@ -223,5 +229,47 @@ export const BENCHMARK_CASES: BenchmarkCase[] = [
     expectedCategory: "General Question",
     expectedUrgency: "Low",
     expectedIsComplaint: false,
+  },
+
+  // ── Cases 21-24: Phase-3 re-baseline (2026-07-02) ─────────────────────────
+  // 21-22 measure the Community Chat / Spam split (scams and benign banter no
+  // longer share a bucket). 23-24 measure the reworked urgency criteria
+  // (fragment cap at Medium; vague loss/compromise claims are High, not
+  // Critical). Wording deliberately differs from the GROQ_SYSTEM_PROMPT
+  // category lines and urgency examples so /api/eval measures generalisation.
+  {
+    id: 21,
+    description: "Genuine spam — investment-signal scam promo",
+    message:
+      "💰💰 I turned $200 into $9,000 in one week! Join my private signals group and start earning today, message me directly to begin 🚀",
+    expectedCategory: "Spam/Irrelevant",
+    expectedUrgency: "Low",
+    expectedIsComplaint: false,
+  },
+  {
+    id: 22,
+    description: "Community chat — price banter between users",
+    message: "BTC don pump again o 😂 who else dey buy this dip with me??",
+    expectedCategory: "Community Chat",
+    expectedUrgency: "Low",
+    expectedIsComplaint: false,
+  },
+  {
+    id: 23,
+    description:
+      "Urgency cap — context-free fragment must not exceed Medium",
+    message: "Money never enter my wallet o",
+    expectedCategory: "Deposit Issue",
+    expectedUrgency: "Medium",
+    expectedIsComplaint: true,
+  },
+  {
+    id: 24,
+    description:
+      "Urgency cap — vague compromise claim, no funds described, High not Critical",
+    message: "Somebody don hack my account!!",
+    expectedCategory: "Account Access",
+    expectedUrgency: "High",
+    expectedIsComplaint: true,
   },
 ];

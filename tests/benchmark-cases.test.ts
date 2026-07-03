@@ -17,12 +17,13 @@ const VALID_CATEGORIES = [
   "General Question",
   "Praise",
   "Spam/Irrelevant",
+  "Community Chat",
 ];
 const VALID_URGENCIES = ["Critical", "High", "Medium", "Low"];
 
 describe("benchmark-cases — the gold fixture that ships to production", () => {
-  it("has exactly 20 cases (12 English + 6 Pidgin + 2 feature-existence)", () => {
-    expect(BENCHMARK_CASES).toHaveLength(20);
+  it("has exactly 24 cases (12 English + 6 Pidgin + 2 feature-existence + 4 Phase-3 re-baseline)", () => {
+    expect(BENCHMARK_CASES).toHaveLength(24);
   });
 
   it("has unique ids", () => {
@@ -75,10 +76,25 @@ describe("benchmark-cases — the gold fixture that ships to production", () => 
   });
 
   it("includes feature-existence cases (Bug 4b) expecting General Question", () => {
-    const featureCases = BENCHMARK_CASES.filter((c) => c.id >= 19);
+    const featureCases = BENCHMARK_CASES.filter(
+      (c) => c.id >= 19 && c.id <= 20,
+    );
     expect(featureCases.length).toBe(2);
     for (const c of featureCases) {
       expect(c.expectedCategory).toBe("General Question");
     }
+  });
+
+  it("includes the Phase-3 re-baseline cases (Community Chat split + urgency caps)", () => {
+    const byId = new Map(BENCHMARK_CASES.map((c) => [c.id, c]));
+    // Case 4 moved out of Spam/Irrelevant in the taxonomy rework.
+    expect(byId.get(4)?.expectedCategory).toBe("Community Chat");
+    // 21: genuine scam stays Spam/Irrelevant; 22: banter is Community Chat.
+    expect(byId.get(21)?.expectedCategory).toBe("Spam/Irrelevant");
+    expect(byId.get(22)?.expectedCategory).toBe("Community Chat");
+    // 23: a context-free fragment caps at Medium.
+    expect(byId.get(23)?.expectedUrgency).toBe("Medium");
+    // 24: a vague compromise claim with no funds described is High, not Critical.
+    expect(byId.get(24)?.expectedUrgency).toBe("High");
   });
 });
