@@ -92,6 +92,7 @@ import {
   isSystemBotMessage,
   parseAdminSenderHashes,
 } from "./message-reconciliation";
+import { findActionableSignals, buildAuditSnippet } from "./dismissed-audit";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -4722,6 +4723,76 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
     } catch (e) {
       logger.error("API", `POST /api/test-message error: ${e.message}`);
       return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Phase 4 hardening (2026-07-03): the Dismissed-audit surface. Lists recent
+  // Dismissed tickets whose USER text carries actionable signals (refund,
+  // stuck funds, locked account…) — the safety net for the worst failure
+  // class: a real issue the noise pipeline filed where nobody looks. Pure
+  // signal logic lives in dismissed-audit.ts; this endpoint is read-only
+  // (reopening goes through the existing POST /api/tickets/:id/status).
+  app.get("/api/dismissed-audit", requireAuth, async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const daysRaw = Number(req.query.days);
+      const days = Number.isFinite(daysRaw)
+        ? Math.min(Math.max(Math.trunc(daysRaw), 1), 90)
+        : 30;
+      const cutoffISO = new Date(
+        Date.now() - days * 24 * 60 * 60 * 1e3,
+      ).toISOString();
+      const { data: rows, error } = await supabase
+        .from("tickets")
+        .select("id, created_at, category, urgency, summary, raw_text")
+        .eq("status", "Dismissed")
+        .eq("is_admin_message", false)
+        .gte("created_at", cutoffISO)
+        .order("created_at", { ascending: false })
+        .limit(1000);
+      if (error) throw new Error(error.message);
+      const scanned = (rows || []).length;
+      const candidates = [];
+      for (const t of rows || []) {
+        // Only the user's side of the thread — an admin reply's wording
+        // ("we have refunded you") must never flag a ticket.
+        const userText = userThreadText(t.raw_text || "");
+        const signals = findActionableSignals(userText);
+        if (signals.length === 0) continue;
+        candidates.push({
+          id: t.id,
+          createdAt: t.created_at,
+          category: t.category,
+          urgency: t.urgency,
+          summary: t.summary,
+          signals,
+          snippet: buildAuditSnippet(userText),
+        });
+        if (candidates.length >= 100) break;
+      }
+      // A ticket a human already reviewed in /train (confirm, fix, or skip)
+      // has been audited — hide it. Same reviewed-semantics as /api/train/next
+      // (human_urgency is an urgency-only tweak, not a review; admin_reply is
+      // machine-inferred, not a human look).
+      let flagged = candidates;
+      if (candidates.length > 0) {
+        const reviewedIds = new Set();
+        for (let i = 0; i < candidates.length; i += 200) {
+          const slice = candidates.slice(i, i + 200).map((c) => c.id);
+          const { data: reviewedRows, error: revErr } = await supabase
+            .from("corrections")
+            .select("ticket_id")
+            .in("ticket_id", slice)
+            .in("correction_source", ["human_ui", "human_skip"]);
+          if (revErr) throw new Error(revErr.message);
+          (reviewedRows || []).forEach((r) => reviewedIds.add(r.ticket_id));
+        }
+        flagged = candidates.filter((c) => !reviewedIds.has(c.id));
+      }
+      return res.json({ days, scanned, flagged });
+    } catch (e) {
+      logger.error("API", `GET /api/dismissed-audit error: ${e.message}`);
+      return res.status(500).json({ error: "An internal error occurred." });
     }
   });
 

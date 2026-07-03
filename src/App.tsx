@@ -449,6 +449,12 @@ export default function App() {
   const [verifyState, setVerifyState] = useState<any>(null);
   const [verifyStarting, setVerifyStarting] = useState(false);
 
+  // -- Dismissed-audit state (Phase 4 hardening) -------------------------------
+  const [showDismissedAudit, setShowDismissedAudit] = useState<boolean>(false);
+  const [dismissedAudit, setDismissedAudit] = useState<any>(null);
+  const [dismissedAuditLoading, setDismissedAuditLoading] = useState<boolean>(false);
+  const [reopenedIds, setReopenedIds] = useState<Set<string>>(new Set());
+
   // -- Filters ----------------------------------------------------------------
   const [filterCategory, setFilterCategory]     = useState<string>("All");
 
@@ -808,6 +814,41 @@ export default function App() {
     e.target.value = '';
   };
 
+  // -- Dismissed-ticket audit (Phase 4 hardening) ------------------------------
+  // Lists recent Dismissed tickets carrying actionable signals so a real issue
+  // misfiled as noise gets a human look instead of staying invisible.
+  const loadDismissedAudit = async () => {
+    setDismissedAuditLoading(true);
+    setShowDismissedAudit(true);
+    try {
+      const res = await apiFetch("/api/dismissed-audit");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load the audit");
+      setDismissedAudit(data);
+    } catch (e: any) {
+      setDismissedAudit({ error: e.message });
+    }
+    setDismissedAuditLoading(false);
+  };
+
+  const handleReopenDismissed = async (ticketId: string) => {
+    try {
+      const res = await apiFetch(`/api/tickets/${ticketId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status: "Open" }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(`Failed to reopen: ${err.error}`);
+        return;
+      }
+      setReopenedIds(prev => new Set(prev).add(ticketId));
+    } catch (e) {
+      console.error(e);
+      alert("Failed to reopen ticket.");
+    }
+  };
+
   // -- Training-loop verification (Milestone 4) -------------------------------
   const pollVerify = useCallback(async () => {
     try {
@@ -1047,6 +1088,14 @@ export default function App() {
             className="bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md hover:bg-indigo-500/10 hover:border-indigo-500/30 transition text-[10px] font-bold text-white/50 hover:text-indigo-300 uppercase tracking-widest flex items-center gap-1.5"
           >
             🎯 Benchmark
+          </button>
+          <button
+            id="open-dismissed-audit"
+            onClick={loadDismissedAudit}
+            title="Audit Dismissed tickets for real issues filed as noise"
+            className="bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md hover:bg-amber-500/10 hover:border-amber-500/30 transition text-[10px] font-bold text-white/50 hover:text-amber-300 uppercase tracking-widest flex items-center gap-1.5"
+          >
+            🕵️ Dismissed Audit
           </button>
           <button
             onClick={handleLogout}
@@ -2076,6 +2125,66 @@ export default function App() {
                     {evalLoading ? "Running..." : "🔄 Run Built-in Benchmark"}
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* -- Dismissed Audit Panel (Phase 4 hardening) -- */}
+        {showDismissedAudit && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-[#0d1117] border border-white/10 rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl">
+              <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-white">Dismissed-Ticket Audit</h2>
+                  <p className="text-xs text-white/40 mt-0.5">
+                    Dismissed tickets from the last {dismissedAudit?.days ?? 30} days that carry actionable signals — the safety net for a real issue filed as noise.
+                  </p>
+                </div>
+                <button onClick={() => setShowDismissedAudit(false)} className="text-white/40 hover:text-white transition p-1 rounded-lg hover:bg-white/10">x</button>
+              </div>
+              <div className="overflow-y-auto flex-1 p-6">
+                {dismissedAuditLoading ? (
+                  <div className="flex justify-center py-10"><div className="animate-spin text-amber-400"><RefreshCcw /></div></div>
+                ) : dismissedAudit?.error ? (
+                  <p className="text-sm text-rose-400">{dismissedAudit.error}</p>
+                ) : (dismissedAudit?.flagged?.length ?? 0) === 0 ? (
+                  <div className="text-center py-10">
+                    <p className="text-sm text-white/60">No flagged tickets 🎉</p>
+                    <p className="text-xs text-white/30 mt-1">Scanned {dismissedAudit?.scanned ?? 0} Dismissed tickets — none carry actionable signals (tickets already reviewed in Train are hidden).</p>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-xs text-white/40 mb-4">
+                      {dismissedAudit.flagged.length} of {dismissedAudit.scanned} scanned Dismissed tickets look actionable. Reopen sends a ticket back to the Open queue; tickets already reviewed in 🎓 Train are hidden.
+                    </p>
+                    <div className="space-y-3">
+                      {dismissedAudit.flagged.map((t: any) => (
+                        <div key={t.id} className="bg-black/30 border border-white/10 rounded-xl p-4 flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                              {t.signals.map((s: string) => (
+                                <span key={s} className="text-[10px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30 rounded px-1.5 py-0.5">{s}</span>
+                              ))}
+                              <span className="text-[10px] text-white/30">{t.category} · {new Date(t.createdAt).toLocaleDateString()}</span>
+                            </div>
+                            <p className="text-sm text-white/80 break-words">{t.snippet}</p>
+                          </div>
+                          {reopenedIds.has(t.id) ? (
+                            <span className="shrink-0 text-xs font-bold text-emerald-400 px-3 py-1.5">Reopened ✓</span>
+                          ) : (
+                            <button
+                              onClick={() => handleReopenDismissed(t.id)}
+                              className="shrink-0 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition"
+                            >
+                              Reopen
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>
