@@ -431,8 +431,10 @@ function parseAndValidateClassification(jsonStr) {
 var ISSUE_SIGNALS = [
   // Action/problem verbs
   /\b(stuck|pending|fail|error|problem|issue|help|urgent|cannot|can't|won't|didn't|doesn't|broken|not working|missing|lost|wrong|blocked|gone|disappeared|reversed)\b/i,
-  // Crypto/finance actions
-  /\b(withdraw|deposit|transfer|send|receive|kyc|verify|login|password|account|fund|balance|trade|swap|exchange|buy|sell)\b/i,
+  // Crypto/finance actions. refund needs its own stem: \b(fund)\b never
+  // matches inside "refund", so "Pls do a refund" (audit find, 2026-07-02)
+  // sailed past every signal and was pre-filtered to Dismissed.
+  /\b(withdraw|deposit|transfer|send|receive|kyc|verify|login|password|account|fund|refund(?:ed|s)?|balance|trade|swap|exchange|buy|sell)\b/i,
   // Question words
   /\b(how|why|when|what|where)\b/i,
   // Time pressure
