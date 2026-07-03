@@ -49,8 +49,12 @@ describe("isCategoryFallback", () => {
 });
 
 describe("decideClassificationOutcome - auto-dismiss policy", () => {
-  it("dismisses only Spam/Irrelevant and Praise", () => {
-    expect(AUTO_DISMISS_CATEGORIES).toEqual(["Praise", "Spam/Irrelevant"]);
+  it("dismisses only Spam/Irrelevant, Praise, and Community Chat", () => {
+    expect(AUTO_DISMISS_CATEGORIES).toEqual([
+      "Praise",
+      "Spam/Irrelevant",
+      "Community Chat",
+    ]);
     expect(
       decideClassificationOutcome(td({ category: "Spam/Irrelevant" }), flags())
         .status,
@@ -58,6 +62,19 @@ describe("decideClassificationOutcome - auto-dismiss policy", () => {
     expect(
       decideClassificationOutcome(td({ category: "Praise" }), flags()).status,
     ).toBe("Dismissed");
+    expect(
+      decideClassificationOutcome(td({ category: "Community Chat" }), flags())
+        .status,
+    ).toBe("Dismissed");
+  });
+
+  it("forces Community Chat to Low urgency (like General Question)", () => {
+    const o = decideClassificationOutcome(
+      td({ category: "Community Chat", urgency: "High" }),
+      flags(),
+    );
+    expect(o.status).toBe("Dismissed");
+    expect(o.urgency).toBe("Low");
   });
 
   it("keeps General Question Open at Low urgency (no longer dismissed)", () => {
@@ -79,12 +96,14 @@ describe("decideClassificationOutcome - auto-dismiss policy", () => {
     ).toBe("Open");
   });
 
-  it("escalates a Critical issue to In Review with [ESCALATED]", () => {
+  it("keeps a fresh Critical issue Open, flagged [ESCALATED] (never In Review)", () => {
+    // "In Review" renders as "Admin Replied" on the dashboard — dishonest for
+    // a ticket no admin has touched (Phase 3, 2026-07-02).
     const o = decideClassificationOutcome(
       td({ category: "Withdrawal Issue", urgency: "Critical" }),
       flags(),
     );
-    expect(o.status).toBe("In Review");
+    expect(o.status).toBe("Open");
     expect(o.summary).toBe("[ESCALATED] User cannot withdraw");
   });
 

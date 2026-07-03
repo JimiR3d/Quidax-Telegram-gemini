@@ -429,7 +429,7 @@ export default function App() {
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
   const [jiraLoading, setJiraLoading]           = useState<Record<string, boolean>>({});
 
-  // -- Issues-Only filter (default ON - hides General Question, Praise, Spam) --
+  // -- Issues-Only filter (default ON - hides General Question, Praise, Spam, Community Chat) --
   const [showIssuesOnly, setShowIssuesOnly] = useState<boolean>(true);
 
   // -- Backfill progress -----------------------------------------------------
@@ -936,7 +936,7 @@ export default function App() {
   };
 
   const KPI_TOOLTIPS: Record<string, string> = {
-    "Active Issues": "Tickets that still need attention — Open, In Review, Escalated, and Awaiting User combined. Noise categories (General Question, Praise, Spam, Irrelevant) are excluded, as are Handed Off tickets (sent to email/DM, where the resolution happens off-platform).",
+    "Active Issues": "Tickets that still need attention — Open, In Review, Escalated, and Awaiting User combined. Noise categories (General Question, Praise, Spam/Irrelevant, Community Chat) are excluded, as are Handed Off tickets (sent to email/DM, where the resolution happens off-platform).",
     "In Review": "Tickets where an admin has replied but the issue isn't closed yet. Also includes Escalated and Awaiting User tickets. A new user reply on an Awaiting User ticket moves it back to In Review.",
     "Resolved": "Tickets closed as Resolved or Assumed Resolved in this period. Assumed Resolved = no new activity for 7+ days after an admin reply.",
     "Resolution Rate": "Resolved ÷ (Resolved + Active). Dismissed and Handed Off tickets are not counted — Dismissed is noise/spam, and Handed Off resolutions happen off-platform where we can't observe them.",

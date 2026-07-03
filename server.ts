@@ -348,11 +348,13 @@ var VALID_CATEGORIES = [
   "General Question",
   "Praise",
   "Spam/Irrelevant",
+  "Community Chat",
 ];
 var NON_ESSENTIAL_CATEGORIES = /* @__PURE__ */ new Set([
   "General Question",
   "Praise",
   "Spam/Irrelevant",
+  "Community Chat",
 ]);
 var VALID_URGENCIES = ["Critical", "High", "Medium", "Low"];
 var VALID_PRODUCT_AREAS = [
@@ -397,6 +399,14 @@ function normalizeCategory(cat) {
   if (c.includes("network") || c.includes("down")) return "Network/Downtime";
   if (c.includes("praise") || c.includes("thanks")) return "Praise";
   if (c.includes("spam") || c.includes("irrelevant")) return "Spam/Irrelevant";
+  if (
+    c.includes("community") ||
+    c.includes("chat") ||
+    c.includes("banter") ||
+    c.includes("greeting")
+  ) {
+    return "Community Chat";
+  }
   return "General Question";
 }
 
@@ -1175,7 +1185,7 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
         .not(
           "category",
           "in",
-          '("General Question","Praise","Spam/Irrelevant")',
+          '("General Question","Praise","Spam/Irrelevant","Community Chat")',
         )
         .order("last_message_at", { ascending: true, nullsFirst: true })
         .limit(ASSUME_RESOLVE_SWEEP_LIMIT);
@@ -1310,7 +1320,7 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
         .not(
           "category",
           "in",
-          '("General Question","Praise","Spam/Irrelevant")',
+          '("General Question","Praise","Spam/Irrelevant","Community Chat")',
         )
         .order("last_message_at", { ascending: true, nullsFirst: true })
         .limit(500);
@@ -1699,18 +1709,22 @@ Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Jus
 - "Network/Downtime"  - platform down, cannot connect, widespread login failure
 - "General Question"  - asking for information, or whether a feature exists / an action is allowed, with no problem reported (e.g. "what is the withdrawal limit?", "can I send crypto to an external wallet?", "is it possible to convert USDT to Naira?")
 - "Praise"            - positive feedback, compliment, no issue
-- "Spam/Irrelevant"   - greetings, off-topic, emojis only, price discussion
+- "Community Chat"    - greetings ("gm", "good morning fam"), casual banter, user-to-user chatter, price discussion/market talk, emoji-only messages — friendly noise with no support issue and no scam
+- "Spam/Irrelevant"   - scams, phishing, investment-signal spam, ads/promotions for other services, off-topic junk
 
 === URGENCY RULES (pick exactly one) ===
-- "Critical" - money stuck/lost, account hacked, funds withdrawn without consent, 3+ days without resolution
-- "High"     - active financial problem (deposit/withdrawal issue < 3 days), account locked with funds at risk
-- "Medium"   - KYC pending, app bug, trading problem, fee dispute, 1-2 day delays
-- "Low"      - general questions, praise, minor inconvenience, no financial impact
+- "Critical" - confirmed account compromise (unauthorized access AND funds taken), or a SPECIFIC described transaction (amount, asset, or timeframe given) that is stuck/failed/missing for 3+ days. A vague claim of lost/stolen money with NO specific failing transaction described is "High", NOT "Critical".
+- "High"     - active financial problem under 3 days (deposit/withdrawal stuck or failed), account locked with funds at risk, platform-wide outage or widespread login failure (multiple users affected) — even when phrased as a question
+- "Medium"   - KYC pending, app bug, trading problem, fee dispute, 1-2 day delays. A context-free fragment (a bare transaction ID/number, or a few words with no described problem) is NEVER higher than "Medium".
+- "Low"      - general questions, praise, community chat, minor inconvenience, no financial impact
 
 === URGENCY EXAMPLES ===
 "I have been trying to withdraw NGN250,000 since Monday" -> Critical
 "My deposit hasn't reflected after 2 hours" -> High
+"Is Quidax down? None of us can log in right now" -> High (widespread outage, even as a question)
+"You people have stolen my money, worst app ever" -> High (no specific transaction described, so not Critical)
 "My KYC was rejected, I need to resubmit" -> Medium
+"8474639201" -> Medium (context-free fragment)
 "What are the withdrawal limits for Tier 1?" -> Low
 
 === KEY CONTEXT ===
@@ -3127,7 +3141,7 @@ ${lines.join("\n---\n")}`;
         if (isPreFiltered) {
           ticketData = {
             summary: "General Chat",
-            category: "General Question",
+            category: "Community Chat",
             urgency: "Low",
             product_area: "Other",
             sentiment: "Neutral",

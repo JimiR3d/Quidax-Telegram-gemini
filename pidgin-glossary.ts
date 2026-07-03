@@ -45,7 +45,7 @@ export const PIDGIN_TERMS: PidginTerm[] = [
   {
     phrase: "dem chop my money / my money don disappear / balance don go",
     meaning: "funds are missing or stolen",
-    hint: "Account Access (Critical) or Withdrawal Issue (Critical)",
+    hint: "Account Access or Withdrawal Issue — Critical only when a specific transaction/amount is described, otherwise High",
   },
   {
     phrase: "abeg / abeg help me / abeg o",
@@ -85,7 +85,7 @@ Many Quidax users write in Nigerian Pidgin English. Classify their messages by m
 - "e dey pending" / "e hang" / "e no process" → transaction stuck → Withdrawal Issue or Deposit Issue
 - "dem block my account" / "I no fit enter" / "account don lock" → locked out → Account Access (High — not Critical unless 3+ days or funds confirmed missing)
 - "my money dey inside" → funds ARE in the account but inaccessible → account locked with funds at risk → High (NOT Critical; money is present, not lost or stolen)
-- "dem chop my money" / "my money don disappear" / "balance don go" → funds missing or stolen → Account Access (Critical) or Withdrawal Issue (Critical)
+- "dem chop my money" / "my money don disappear" / "balance don go" → funds missing or stolen → Account Access or Withdrawal Issue (Critical only when a specific transaction/amount is described; a vague claim with no details is High)
 - "abeg" → please (signals frustration or urgency — not a separate category on its own)
 - "e don do" → context-dependent: "app e don do" = feature is broken (App Bug); standalone exclamation = not a support issue
 - "[transaction] enter" / "enter sharp sharp" / "enter quick quick" → transaction completed successfully (POSITIVE — money arrived as expected)

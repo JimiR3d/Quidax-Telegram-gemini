@@ -15,6 +15,7 @@ const VALID_CATEGORIES = [
   "General Question",
   "Praise",
   "Spam/Irrelevant",
+  "Community Chat",
 ];
 
 describe("pidgin-glossary — Nigerian Pidgin prompt section", () => {
