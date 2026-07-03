@@ -84,6 +84,22 @@ export function filterReconcileCandidates(
     );
 }
 
+// Parse the ADMIN_SENDER_HASHES env var (comma-separated sender hashes) into a
+// Set the sweep merges with the hashes it derives from admin-authored tickets.
+// The derived set is sparse — admin messages are dropped by design, so a
+// brand-new admin who has never authored a ticket is invisible to it, and the
+// sweep could resurrect that admin's dropped replies as bogus USER tickets.
+// This allowlist is the operator-maintained backstop for exactly that gap.
+export function parseAdminSenderHashes(raw: string | undefined): Set<string> {
+  if (typeof raw !== "string") return new Set();
+  return new Set(
+    raw
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0),
+  );
+}
+
 // Telegram group system/bot messages that the LIVE pipeline drops via
 // checkIsAdmin (the welcome bot and the moderation/ban bot), but which the
 // reconciliation sweep cannot re-detect that way: `messages` stores only a

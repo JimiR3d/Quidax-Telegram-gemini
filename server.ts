@@ -90,6 +90,7 @@ import {
   filterReconcileCandidates,
   buildRepresentationProbe,
   isSystemBotMessage,
+  parseAdminSenderHashes,
 } from "./message-reconciliation";
 
 declare module "express-serve-static-core" {
@@ -1547,8 +1548,15 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
         );
       }
       // Sender hashes that belong to admin-authored tickets — never resurrect an
-      // admin message (they are dropped by design when unattached).
-      const adminSenderHashes = new Set<string>();
+      // admin message (they are dropped by design when unattached). The derived
+      // set is sparse (admin messages rarely become tickets), so the
+      // ADMIN_SENDER_HASHES env allowlist backstops it: a brand-new admin who
+      // has never authored a ticket would otherwise be invisible here and their
+      // dropped replies could come back as bogus USER tickets.
+      const adminSenderHashes = parseAdminSenderHashes(
+        process.env.ADMIN_SENDER_HASHES,
+      );
+      const allowlistedCount = adminSenderHashes.size;
       const { data: adminRows } = await supabase
         .from("tickets")
         .select("sender_hash")
@@ -1556,6 +1564,10 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
       (adminRows || []).forEach(
         (r) => r.sender_hash && adminSenderHashes.add(r.sender_hash),
       );
+      logger.debug("Reconcile", "Admin sender-hash guard assembled", {
+        allowlisted: allowlistedCount,
+        derived: adminSenderHashes.size - allowlistedCount,
+      });
       const candidates = filterReconcileCandidates(candidatesRaw, {
         rootTelegramIds,
         adminSenderHashes,

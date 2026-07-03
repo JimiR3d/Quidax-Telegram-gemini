@@ -4,6 +4,7 @@ import {
   escapeLikePattern,
   buildRepresentationProbe,
   isSystemBotMessage,
+  parseAdminSenderHashes,
   MIN_RECOVERABLE_LEN,
   PROBE_MAX_LEN,
   type ReconcileMessage,
@@ -177,6 +178,40 @@ describe("isSystemBotMessage", () => {
   it("returns false for empty / non-string input", () => {
     expect(isSystemBotMessage("")).toBe(false);
     expect(isSystemBotMessage(null as unknown as string)).toBe(false);
+  });
+});
+
+describe("parseAdminSenderHashes", () => {
+  it("parses a comma-separated list, trimming whitespace", () => {
+    const out = parseAdminSenderHashes(" 7b08fcbe , abc123 ,def456");
+    expect(out).toEqual(new Set(["7b08fcbe", "abc123", "def456"]));
+  });
+
+  it("returns an empty set for undefined (env var not set)", () => {
+    expect(parseAdminSenderHashes(undefined).size).toBe(0);
+  });
+
+  it("returns an empty set for an empty or whitespace-only value", () => {
+    expect(parseAdminSenderHashes("").size).toBe(0);
+    expect(parseAdminSenderHashes("   ").size).toBe(0);
+  });
+
+  it("drops empty entries from stray commas", () => {
+    const out = parseAdminSenderHashes(",7b08fcbe,,abc123,");
+    expect(out).toEqual(new Set(["7b08fcbe", "abc123"]));
+  });
+
+  it("keeps a single hash with no commas", () => {
+    expect(parseAdminSenderHashes("7b08fcbe")).toEqual(new Set(["7b08fcbe"]));
+  });
+
+  it("feeds directly into the candidate filter as an admin drop-set", () => {
+    const adminMsg = msg({ telegramMessageId: "300", senderHash: "newadmin_hash" });
+    const out = filterReconcileCandidates(
+      [adminMsg, msg({})],
+      ctx({ adminSenderHashes: parseAdminSenderHashes("newadmin_hash") }),
+    );
+    expect(out.map((m) => m.telegramMessageId)).toEqual(["100"]);
   });
 });
 
