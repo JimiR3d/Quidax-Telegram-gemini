@@ -25,6 +25,48 @@ export const AUTO_DISMISS_CATEGORIES = [
   "Community Chat",
 ];
 
+// Urgent-is-never-noise guard (2026-07-03). A High/Critical verdict on a
+// noise-category ticket is either a real issue mis-bucketed (live ticket
+// 25f6281d: a 100k scam complaint reclassified to General Question by an
+// admin-reply correction, urgency untouched) or the classifier contradicting
+// itself — both deserve human eyes. Fresh classifications can't create the
+// combo (decideClassificationOutcome forces Low for General Question /
+// Community Chat), but side paths that never re-derive urgency can:
+// admin-reply reclassify, /train category fixes, dashboard urgency bumps,
+// and historical rows. So the guard lives at the READ layer, where it
+// catches every path, past and future.
+export const ALWAYS_VISIBLE_URGENCIES = ["High", "Critical"];
+
+const quoteCategoryList = (categories: string[]) =>
+  categories.map((c) => `"${c}"`).join(",");
+
+// PostgREST .or() disjuncts for the Issues Only lane: still-classifying
+// placeholders, real-category non-Low tickets, and the urgent-never-noise
+// guard. Dismissed stays out of the lane — the Dismissed Audit surface
+// carries the urgency contradiction there instead.
+export function issuesOnlyOrClause(
+  nonEssentialCategories: string[],
+): string {
+  return (
+    `summary.eq."Processing message...",` +
+    `and(category.not.in.(${quoteCategoryList(nonEssentialCategories)}),urgency.neq.Low),` +
+    `and(urgency.in.(${ALWAYS_VISIBLE_URGENCIES.join(",")}),status.neq.Dismissed)`
+  );
+}
+
+// PostgREST .or() for the auto-resolve sweeps' category eligibility: a noise
+// category no longer excludes a ticket the classifier itself rated
+// High/Critical — once such a ticket is visible in the lane it must also be
+// closeable by the sweeps, or it sits active forever.
+export function sweepCategoryOrClause(
+  nonEssentialCategories: string[],
+): string {
+  return (
+    `category.not.in.(${quoteCategoryList(nonEssentialCategories)}),` +
+    `urgency.in.(${ALWAYS_VISIBLE_URGENCIES.join(",")})`
+  );
+}
+
 // True when a parsed "General Question" was never actually said by the model:
 // the category field was missing/invalid (Zod .catch default) or an unknown
 // label that normalizeCategory defaulted. A genuine "General Question" (or
