@@ -101,21 +101,15 @@ function csvCell(v) {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-async function login() {
-  const res = await fetch(`${BASE_URL}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: PASSWORD }),
-  });
-  if (!res.ok) {
-    throw new Error(`auth failed ${res.status} — check DASHBOARD_PASSWORD`);
-  }
-  return (await res.json()).token;
-}
+// Stateless auth: the x-admin-key header is compared against the env var on
+// every request, unlike a login token, which lives in the server's in-memory
+// map and DIES on a redeploy — a mid-run deploy 401'd the polling loop once
+// (2026-07-03). A 15-minute script must not depend on server memory.
+const AUTH_HEADERS = { "x-admin-key": PASSWORD };
 
-async function getProgress(token) {
+async function getProgress() {
   const res = await fetch(`${BASE_URL}/api/eval/progress`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: AUTH_HEADERS,
     signal: AbortSignal.timeout(30000),
   });
   if (!res.ok) {
@@ -130,8 +124,8 @@ async function getProgress(token) {
 // POST also stays inside heavyLimiter (5 requests / 15 min) — the old
 // 10-per-batch loop would be rate-limited. expected* are dummies; the run's
 // accuracy fields are meaningless here and ignored.
-async function classifyAll(token, texts) {
-  const before = await getProgress(token);
+async function classifyAll(texts) {
+  const before = await getProgress();
   if (before.running) {
     throw new Error(
       `a benchmark run is already in progress (${before.done}/${before.total}) — retry when it finishes`,
@@ -141,7 +135,7 @@ async function classifyAll(token, texts) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...AUTH_HEADERS,
     },
     body: JSON.stringify({
       messages: texts.map((t) => ({
@@ -163,7 +157,7 @@ async function classifyAll(token, texts) {
   const deadline = Date.now() + texts.length * 15000 * 1.5 + 60000;
   for (;;) {
     await new Promise((r) => setTimeout(r, 15000));
-    const p = await getProgress(token);
+    const p = await getProgress();
     if (p.error) throw new Error(`eval run crashed server-side: ${p.error}`);
     process.stdout.write(`\r  progress ${p.done}/${p.total}   `);
     if (!p.running && p.finishedAt) {
@@ -228,8 +222,7 @@ async function main() {
   }
 
   // 2. Classify via the deployed production prompt — one background eval run.
-  const token = await login();
-  const preds = await classifyAll(token, picked.map((p) => p.message));
+  const preds = await classifyAll(picked.map((p) => p.message));
   picked.forEach((p, i) => {
     p.aiCategory = preds[i]?.aiCategory ?? "ERROR";
     p.aiUrgency = preds[i]?.aiUrgency ?? "ERROR";
