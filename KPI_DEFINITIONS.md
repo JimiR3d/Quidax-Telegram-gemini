@@ -29,15 +29,18 @@ Before the KPIs make sense, the status vocabulary must be clear:
 ```sql
 count(*) FILTER (
   WHERE status IN ('Open', 'In Review', 'Escalated', 'Awaiting User')
-    AND category NOT IN ('General Question', 'Praise', 'Spam/Irrelevant', 'Community Chat')
+    AND (category NOT IN ('General Question', 'Praise', 'Spam/Irrelevant', 'Community Chat')
+         OR urgency IN ('High', 'Critical'))
 )
 ```
 
 **Why noise categories are excluded:** General Question, Praise, Spam/Irrelevant, and Community Chat tickets can linger in an "active" status even after the classifier puts them there — they are ambient community chatter, not support backlog. Including them inflated the denominator and made the resolution rate read far too low. The decision was made on 2026-06-19 after reconciling all 786 tickets against live SQL; the Community Chat category was added to the noise set on 2026-07-02 (migration 022), when greetings/banter were split out of Spam/Irrelevant so scams and friendly chatter no longer share a bucket.
 
+**Urgent is never noise (migration 023, 2026-07-03):** an active ticket the classifier itself rated High or Critical counts as demand even when its category is in the noise set. A live scam complaint ("scammed me of 100k") ended up as General Question / High after an admin-reply reclassification changed only the category — under the old rule it silently vanished from this count and from the Issues Only view. The same exception applies to the Issues Only filter and both auto-resolve sweeps.
+
 **Admin-rooted tickets are excluded from every number** (migration 022, 2026-07-02): the stats function filters `is_admin_message = false` at the source, so a legacy ticket created from an admin's own message can never count as demand or as a resolution.
 
-**What it does NOT include:** Assumed Resolved, Handed Off, Dismissed, or any active ticket in a noise category.
+**What it does NOT include:** Assumed Resolved, Handed Off, Dismissed, or any active ticket in a noise category (unless that ticket is High/Critical urgency — see above).
 
 ---
 
@@ -219,7 +222,7 @@ This is the `resolutionData` array computed in `server.ts`. Dismissed and Handed
 An earlier version counted Dismissed spam as resolutions. 80% was the inflated number; 46% is what you get when only genuine support tickets that the system actually observed closing count.
 
 **"What's in 'Active Issues' — why not just count all open tickets?"**
-Active Issues is a denominator, not a simple open count. General Question / Praise / Spam/Irrelevant / Community Chat tickets can reach an active status before being dismissed by a sweep — they are community chatter, not support backlog, and including them made the rate falsely low. The filter is a product decision made on the basis of a full reconciliation against live SQL.
+Active Issues is a denominator, not a simple open count. General Question / Praise / Spam/Irrelevant / Community Chat tickets can reach an active status before being dismissed by a sweep — they are community chatter, not support backlog, and including them made the rate falsely low. The filter is a product decision made on the basis of a full reconciliation against live SQL. One exception (2026-07-03): a ticket the classifier itself rated High or Critical urgency counts even in a noise category — an urgent verdict is never treated as noise, so a mis-bucketed scam complaint can't disappear from the numbers.
 
 **"What's an 'Assumed Resolved' ticket — is the AI just guessing?"**
 Two conditions must both be true: (a) an admin must have replied (the issue was addressed), and (b) the user must have gone quiet for at least 7 days. Both conditions are factual DB checks, not AI inference. The AI inference path additionally asks whether the thread content supports resolution — and only flips the status if the answer is clearly yes. Every such ticket is auditable and reversible.
