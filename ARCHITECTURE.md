@@ -128,7 +128,7 @@ The fix: actively track `pts` (seed from `GetFullChannel.fullChat.pts`, advance 
 
 ### Why two separate AI providers
 
-**Groq (LLaMA 3.1)** for classification: high throughput, very low latency, free tier handles the message volume. Classification must run on every message.
+**Groq** (`GROQ_MODEL`, currently `openai/gpt-oss-20b`; migrated from `llama-3.1-8b-instant` in July 2026 ahead of its free-tier retirement) for classification: high throughput, very low latency, free tier handles the message volume. Classification must run on every message.
 
 **Google Gemini** for suggested replies: higher-quality natural language generation for empathetic, contextual customer replies. Runs once per ticket, not per message.
 
@@ -154,6 +154,59 @@ A 10-second poll is stateless, trivial to reason about, and robust against dropp
 
 ---
 
+## Ticket status machine
+
+Eight statuses. Four count as ACTIVE (the resolution-rate denominator), two count as resolved (the numerator), and two are excluded from the rate entirely — because counting them anywhere would be dishonest.
+
+| Status | Meaning | Rate role |
+|--------|---------|-----------|
+| `Open` | Real issue, no admin engagement yet. A fresh **Critical** lands here with an `[ESCALATED]` prefix in the summary (never as "In Review", which would falsely imply an admin replied) | denominator |
+| `In Review` | An admin has engaged, or a user replied to a parked/closed ticket | denominator |
+| `Escalated` | Human-flagged for priority handling. **No automatic path ever writes this status or moves a ticket out of it** | denominator |
+| `Awaiting User` | Human-parked, waiting on the user | denominator |
+| `Resolved` | Closed with evidence: a human, an admin's definitive answer, or the user's own "thanks, it worked" | numerator |
+| `Assumed Resolved` | Auto-closed by the quiet-time or thread-reading sweeps; auditable as its own status, reopens on any user reply | numerator |
+| `Handed off` | The admin redirected the user off-platform (email/DM) — the outcome is invisible to the listener, so the ticket neither claims a resolution nor drags the denominator | excluded |
+| `Dismissed` | Noise: banter, spam, price commands, scams. Never deleted, always reversible in /train, and watched by the Dismissed Audit surface | excluded |
+
+(The denominator additionally excludes the noise *categories* — General Question, Praise, Spam/Irrelevant, Community Chat — whatever their status.)
+
+```
+  new user message ──┬── noise ──────────────────────────────► Dismissed
+                     └── real issue ──► Open ── admin reply ──► In Review
+                                          │                        │
+        user: "thanks, it worked" ────────┼────────────────────────┼──► Resolved
+        admin gives a definitive answer ──┼────────────────────────┘        ▲
+                                          │                                 │
+        7 days quiet, or the AI reads ────┴──► Assumed Resolved ── user ────┤
+        the thread as settled (sweeps)              │             replies   │
+                                                    ▼                       │
+        admin redirects to email/DM ──► Handed off ─┴── user replies ──► In Review
+
+        Escalated / Awaiting User: entered ONLY from the dashboard, by a human.
+```
+
+### Every transition, with its trigger and guard
+
+| From | To | Trigger | Guard |
+|------|----|---------|-------|
+| *(new)* | `Open` | Real user message (all four ingestion paths share `processAndIngestMessage`) | Dedup on `telegram_message_id` runs first |
+| *(new)* | `Dismissed` | Pre-filter banter (price commands, news pastes) or a noise category from the classifier | The `messages` row is always persisted; reversible in /train |
+| *(new)* | *(no ticket)* | An admin message that attaches to no ticket is dropped by design | `disposeUnattachedMessage` |
+| `Open` | `In Review` | Admin reply attaches | Never touches Escalated / Awaiting User / Resolved |
+| `Open` / `In Review` | `Resolved` | Admin gives a definitive answer (AI verdict, strict `resolved === true`) | Conditional `.in(AUTO_RESOLVABLE_STATUSES)` update; stamps `resolved_at` |
+| `Open` / `In Review` | `Handed off` | Admin redirects off-platform (`handoff-detect.ts`, email + DM patterns) | Checked *before* auto-resolve; `resolved_at` NOT stamped |
+| `Open` / `In Review` / `Awaiting User` | `Assumed Resolved` | Hourly sweeps: 7-day quiet (`assumed-resolved.ts`) or AI thread-reading (`conversation-resolution.ts`), admin-engaged tickets only | **Never Escalated**; conditional update; stamps `resolved_at`; never posts to Telegram |
+| `Awaiting User` / `Assumed Resolved` / `Handed off` | `In Review` | New user reply | Clears `resolved_at` |
+| any active | `Resolved` | User confirms ("thanks", "it worked", "resolved") | Stamps `resolved_at` |
+| `Open` / `In Review` / `Awaiting User` / `Assumed Resolved` | `Dismissed` | User deletes their root message (edit/delete ride the channel-difference drain) | Soft-delete: `messages.deleted_at`; guarded, never clobbers Escalated/Resolved |
+| any | any | Human, via the dashboard status dropdown (`POST /api/tickets/:id/status`) | The only trigger for the outbound bot rails (which ship kill-switched) |
+| `Dismissed` | `Open` | Human clicks Reopen in the Dismissed Audit modal | — |
+
+Every automatic status write is a **guarded conditional update** (`.in("status", […])` in the same statement), so a concurrent human change is never clobbered — the async classifier, both auto-resolve sweeps, the delete handler, and the admin-reply resolver all share this defense. `resolved_at` is the source of truth for closure; every reopen path clears it.
+
+---
+
 ## Pure modules (the testable core)
 
 The trickiest logic is extracted into small modules with no side effects, so it can be tested without a live Telegram connection or database:
@@ -171,12 +224,13 @@ The trickiest logic is extracted into small modules with no side effects, so it 
 | `autofetch-dedup.ts` | Pre-dedup before expensive per-message operations |
 | `reply-target.ts` | Ground-truth ticket attachment from reply-to metadata |
 | `noise-prefilter.ts` | Fast rule-based noise gate (price commands, news pastes) |
+| `dismissed-audit.ts` | Which Dismissed tickets carry actionable signals and deserve a human look? |
 | `listener-health.ts` | Is this message in the target group? Should the watchdog reconnect? |
 | `classification-policy.ts` | Async classifier concurrency and fallback behavior |
 | `admin-message-policy.ts` | Should an unattached admin message become a ticket? |
 | `telegram-guards.ts` | Sender extraction, admin detection, update classification |
 
-Each has its own `tests/*.test.ts` file. Total: 332 tests across 21 files.
+Each has its own `tests/*.test.ts` file. Total: 397 tests across 26 files.
 
 ---
 
