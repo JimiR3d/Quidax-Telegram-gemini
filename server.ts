@@ -1652,46 +1652,6 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
   );
   setInterval(() => reconcileOrphanMessages("periodic sweep"), 60 * 60 * 1e3);
 
-  const GROQ_SCHEMA = {
-    type: "json_schema",
-    json_schema: {
-      name: "ticket_classification",
-      schema: {
-        type: "object",
-        properties: {
-          category: {
-            type: "string",
-            description: "One of: " + VALID_CATEGORIES.join(", "),
-          },
-          urgency: {
-            type: "string",
-            description: "One of: " + VALID_URGENCIES.join(", "),
-          },
-          product_area: {
-            type: "string",
-            description: "One of: " + VALID_PRODUCT_AREAS.join(", "),
-          },
-          sentiment: {
-            type: "string",
-            description: "One of: " + VALID_SENTIMENTS.join(", "),
-          },
-          is_complaint: { type: "boolean" },
-          suggested_action: { type: "string" },
-          summary: { type: "string" },
-        },
-        required: [
-          "category",
-          "urgency",
-          "product_area",
-          "sentiment",
-          "is_complaint",
-          "suggested_action",
-          "summary",
-        ],
-        additionalProperties: false,
-      },
-    },
-  };
   const GROQ_SYSTEM_PROMPT = `You are a ticket classifier for Quidax, a Nigerian crypto exchange (BTC, ETH, USDT, XRP, QDX). Your job is to classify user support messages accurately.
 Respond ONLY with raw JSON matching the schema. No markdown. No explanation. Just JSON.
 
