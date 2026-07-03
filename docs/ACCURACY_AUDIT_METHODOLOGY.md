@@ -21,7 +21,7 @@ the test and the answer key."
 |---|---|---|
 | **Real-traffic agreement audit** | The headline accuracy number | Inputs are real messages; a human judges them blind to the AI |
 | **System-level trust metrics** | The scary failures are bounded | Auto-resolve precision, noise false-negative rate, grouping correctness — human-checked on real tickets |
-| **Internal regression suite** | No prompt regressions | 20 hand-written cases (incl. Pidgin), honestly labelled an engineering guard — *not* the accuracy claim |
+| **Internal regression suite** | No prompt regressions | 24 hand-written cases (incl. Pidgin), honestly labelled an engineering guard — *not* the accuracy claim |
 | **Live Sandbox** | Interactive proof | The evaluator types their own message and watches it classify, live |
 | **Training-loop panel** | The correction loop works | Leads with the improvement on the AI's hardest cases — explicitly not "accuracy" |
 
@@ -33,24 +33,35 @@ the test and the answer key."
 A purely random sample of recent traffic is ~60% banter (General Question / Spam), which
 barely exercises the classifier on the cases that matter. So the sample is **stratified**:
 oversample the actionable categories, cap the noise (but still include it, so the model's
-banter-recognition is measured too). Representative target ~120 messages, drawn from the
-live `tickets` table over a ~60-day window, taking the original user message (the text
-before any appended reply block) plus the full thread as context for the rater.
+banter-recognition is measured too). Representative target **~60 messages** across all
+12 categories (incl. Community Chat), drawn from the live `tickets` table over a ~60-day
+window, taking the original user message (the text before any appended reply block) plus
+the full thread as context for the rater.
+
+**Judgeability gate:** context-free fragments (a bare "USDT too" or a lone transaction id)
+are unjudgeable even for an expert — the v1 rating stalled on them. Messages under a
+minimum word count (default 4, `AUDIT_MIN_WORDS`) are excluded up front. This is
+confidence-gating, not cherry-picking: the rater can still leave any row blank, and blanks
+are excluded from every denominator. (Assembling context around such fragments is the
+grouping system's job, measured separately below.)
 
 Tooling: `scripts/audit-sample.mjs` (read-only — SELECT only, no DB writes).
 
 ### Labelling (the AI column)
 Each sampled message is classified by the **deployed** `/api/eval` endpoint — the exact
-production prompt (`GROQ_SYSTEM_PROMPT` + the Pidgin glossary, `llama-3.1-8b-instant`,
-temperature 0, no few-shot). This guarantees the audited classifier *is* the one in
-production; it is not a re-implementation that could drift. `/api/eval` performs no DB
-writes.
+production prompt (`GROQ_SYSTEM_PROMPT` + the Pidgin glossary, the deployed `GROQ_MODEL`
+— `openai/gpt-oss-20b` as of 2026-07-03 — temperature 0, no few-shot). This guarantees
+the audited classifier *is* the one in production; it is not a re-implementation that
+could drift. `/api/eval` performs no DB writes and runs as a background job: the sampler
+starts one run and polls `GET /api/eval/progress` until it finishes (~15s per message).
 
 ### Judging (the ground truth)
 The sampler emits a **blind worksheet** (`agreement_blind.xlsx`, dropdown-validated) and a
-**hidden key** (`agreement_key.json`, never shown to the rater). A human rater — ideally a
-Quidax support agent, whose expertise *is* the ground truth — fills Category and Urgency
-for every row without seeing the AI's answer. Unjudgeable rows are left blank and excluded.
+**hidden key** (`agreement_key.json`, never shown to the rater). The rater is an
+**independent Quidax support agent**, whose expertise *is* the ground truth — they fill
+Category and Urgency for every row without seeing the AI's answer. Unjudgeable rows are
+left blank and excluded. Author-rated worksheets are deliberately **not** used for the
+published numbers: the audit card stays "pending" until an independent rating lands.
 
 ### Grading (chosen to be fair, not flattering)
 Run by `scripts/audit-score.ts` over the committed, unit-tested core `audit-scoring.ts`:
@@ -87,9 +98,15 @@ the measurement. Tooling: `scripts/audit-system.mjs` (read-only) → blind works
   highest-risk subset), plus a random sample of the banter lane. Verdict:
   *real issue wrongly dismissed / correctly dismissed / borderline*. FN rate = real ÷
   (real + correct). And every Dismissed message stays reversible in /train.
-- **Grouping correctness** — every fold (tickets that merged several user messages) is
-  checked for **over-merge** (two different issues mashed together), and every same-sender
-  cluster of separate tickets is checked for **over-split** (should have been one ticket).
+  This point-in-time audit is complemented by an **ongoing operational net**: the
+  dashboard's Dismissed Audit (`GET /api/dismissed-audit`) continuously scans recent
+  Dismissed tickets with precision-biased signals (refund, stuck funds, account access,
+  hacked/stolen, KYC stuck) and offers one-click reopen — so a dismissed real issue does
+  not have to wait for the next audit to be caught.
+- **Grouping correctness** — the most recent folds (tickets that merged several user
+  messages; capped for rating load) are checked for **over-merge** (two different issues
+  mashed together), and the most recent same-sender clusters of separate tickets are
+  checked for **over-split** (should have been one ticket).
 
 "Can't tell" / "Borderline" / blank verdicts are abstentions, excluded from the denominators.
 
@@ -97,10 +114,12 @@ the measurement. Tooling: `scripts/audit-system.mjs` (read-only) → blind works
 
 ## 3. The other three layers
 
-- **Internal regression suite** — the 20 hand-written cases in `benchmark-cases.ts`
-  (12 English + 6 Nigerian Pidgin + 2 capability questions), run by `/api/eval` with
-  exact-match grading. It is honestly framed in the UI as a *prompt-regression guard* — it
-  proves a prompt change didn't break a known case; it is **not** the accuracy claim.
+- **Internal regression suite** — the 24 hand-written cases in `benchmark-cases.ts`
+  (12 English + 6 Nigerian Pidgin + 2 capability questions + 4 added in the 2026-07-03
+  taxonomy/urgency re-baseline), run by `/api/eval` (a background job with live progress)
+  with exact-match grading. It is honestly framed in the UI as a *prompt-regression
+  guard* — it proves a prompt change didn't break a known case; it is **not** the
+  accuracy claim.
 - **Live Sandbox** (`/api/test-message`) — type any message, watch the live classifier
   label it instantly. The interactive, can't-be-faked proof.
 - **Training-loop panel** (`/api/verify`) — re-runs the AI on messages a human corrected in
@@ -125,11 +144,16 @@ the measurement. Tooling: `scripts/audit-system.mjs` (read-only) → blind works
 
 ## Honest limitations
 
-- A single v1 rater carries inter-rater noise; the strongest version uses Quidax agents,
-  and a 2-rater overlap on a subset would quantify the human-human ceiling.
-- Sample sizes are modest (≈120 for agreement; full-population for auto-resolve and
-  grouping because those populations are small) — the numbers are estimates with real
-  confidence intervals, presented as such, not as precise guarantees.
+- The published numbers wait for an **independent Quidax-agent rating** (the card shows
+  "pending" until then). A single rater still carries inter-rater noise; a 2-rater
+  overlap on a subset would quantify the human-human ceiling.
+- Sample sizes are modest (≈60 for agreement; full-population for auto-resolve and for
+  actionable-category Dismissed; grouping lists capped to the most recent) — the numbers
+  are estimates with real confidence intervals, presented as such, not as precise
+  guarantees.
+- Context-free fragments are excluded from the agreement sheet as unjudgeable (see the
+  judgeability gate above) — the classifier's behaviour on fragments is bounded instead
+  by the grouping metrics and the fragment-specific urgency cap in the prompt.
 - The agreement audit measures the classifier on real text decoupled from any later
   reclassification; it is the classifier's accuracy, not a claim about every downstream
   status transition (those are covered separately by the system-level metrics).
