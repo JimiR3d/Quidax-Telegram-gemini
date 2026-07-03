@@ -756,19 +756,28 @@ export default function App() {
   };
 
   // -- Run AI accuracy benchmark ----------------------------------------------
+  // Phase 4: /api/eval is a background job (a full 24-case run takes ~6 min,
+  // longer than Railway's proxy timeout). Starting returns immediately; the
+  // modal polls /api/eval/progress while the run is active.
+  const pollEval = useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/eval/progress");
+      setEvalResults(await res.json());
+    } catch { /* silent */ }
+  }, [apiFetch]);
+
   const runBenchmark = async (customMessages?: any[]) => {
     setEvalLoading(true);
-    setEvalResults(null);
     setShowBenchmark(true);
     try {
-      const options: RequestInit = {};
-      if (customMessages) {
-        options.method = "POST";
-        options.body = JSON.stringify({ messages: customMessages });
-      }
+      const options: RequestInit = {
+        method: "POST",
+        body: JSON.stringify(customMessages ? { messages: customMessages } : {}),
+      };
       const res  = await apiFetch("/api/eval", options);
       const data = await res.json();
-      setEvalResults(data);
+      if (!res.ok) throw new Error(data.error || "Failed to start the benchmark");
+      await pollEval();
     } catch (e: any) {
       setEvalResults({ error: e.message });
     }
@@ -884,6 +893,17 @@ export default function App() {
     const iv = setInterval(pollVerify, 2000);
     return () => clearInterval(iv);
   }, [showBenchmark, verifyState?.running, pollVerify]);
+
+  // Same open-load + poll-while-running pattern for the benchmark run.
+  useEffect(() => {
+    if (!showBenchmark || IS_TRAIN_ROUTE) return;
+    pollEval();
+  }, [showBenchmark, pollEval]);
+  useEffect(() => {
+    if (!showBenchmark || !evalResults?.running) return;
+    const iv = setInterval(pollEval, 2000);
+    return () => clearInterval(iv);
+  }, [showBenchmark, evalResults?.running, pollEval]);
 
   // -------------------------------------------------------------------------
   // RENDER: Login Screen
@@ -1913,15 +1933,18 @@ export default function App() {
                   <div className="h-px bg-white/10 flex-1"></div>
                 </div>
                 <p className="text-xs text-white/40 mb-4">
-                  20 hand-written cases (incl. Nigerian Pidgin) that guard against prompt regressions — an engineering
+                  24 hand-written cases (incl. Nigerian Pidgin) that guard against prompt regressions — an engineering
                   safety net, <span className="text-white/60">not</span> an accuracy claim. For accuracy, see the
                   Real-Traffic Audit at the top.
                 </p>
-                {evalLoading && (
+                {(evalLoading || evalResults?.running) && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-white/50 text-sm">Running benchmark cases through the AI classifier...</p>
-                    <p className="text-white/30 text-xs">This can take up to a minute</p>
+                    <p className="text-white/50 text-sm">
+                      Running benchmark cases through the AI classifier...
+                      {evalResults?.running ? ` ${evalResults.done}/${evalResults.total}` : ""}
+                    </p>
+                    <p className="text-white/30 text-xs">A full run takes about 6 minutes (free-tier pacing). It continues on the server — you can close this window and come back.</p>
                   </div>
                 )}
 
@@ -1929,13 +1952,13 @@ export default function App() {
                   <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-4 text-rose-400 text-sm">{evalResults.error}</div>
                 )}
 
-                {evalResults && !evalResults.error && (evalResults.total === 0 || evalResults.categoryAccuracy == null) && (
+                {evalResults && !evalResults.error && !evalResults.running && evalResults.startedAt && (evalResults.total === 0 || evalResults.categoryAccuracy == null) && (
                   <div className="bg-white/5 border border-white/10 rounded-xl p-6 text-center text-white/50 text-sm">
                     No benchmark cases available to run.
                   </div>
                 )}
 
-                {evalResults && !evalResults.error && evalResults.total > 0 && evalResults.categoryAccuracy != null && (
+                {evalResults && !evalResults.error && !evalResults.running && evalResults.total > 0 && evalResults.categoryAccuracy != null && (
                   <>
                     {/* Score Cards */}
                     <div className="grid grid-cols-3 gap-4 mb-6">
@@ -1988,9 +2011,9 @@ export default function App() {
                   </>
                 )}
 
-                {!evalLoading && !evalResults && (
+                {!evalLoading && (!evalResults || (!evalResults.error && !evalResults.running && !evalResults.startedAt)) && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4 text-white/40">
-                    <p className="text-sm">Click "Run Built-in Benchmark" below to run the 20-case regression suite (prompt-regression guard, not an accuracy claim).</p>
+                    <p className="text-sm">Click "Run Built-in Benchmark" below to run the 24-case regression suite (prompt-regression guard, not an accuracy claim).</p>
                   </div>
                 )}
 
@@ -2111,18 +2134,18 @@ export default function App() {
 
               {/* Footer */}
               <div className="px-6 py-4 border-t border-white/10 flex justify-between items-center">
-                <p className="text-xs text-white/30">Regression suite: {evalResults?.total || 20} cases · llama-3.1-8b-instant · raw model. Accuracy = the Real-Traffic Audit above.</p>
+                <p className="text-xs text-white/30">Regression suite: {evalResults?.total || 24} cases · raw model (no training injection). Accuracy = the Real-Traffic Audit above.</p>
                 <div className="flex space-x-3">
                   <label className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-4 py-2 rounded-lg transition cursor-pointer flex items-center">
                     Upload Custom JSON
-                    <input type="file" accept=".json" onChange={handleBenchmarkUpload} className="hidden" disabled={evalLoading} />
+                    <input type="file" accept=".json" onChange={handleBenchmarkUpload} className="hidden" disabled={evalLoading || evalResults?.running} />
                   </label>
                   <button
                     onClick={() => runBenchmark()}
-                    disabled={evalLoading}
+                    disabled={evalLoading || evalResults?.running}
                     className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold px-4 py-2 rounded-lg transition"
                   >
-                    {evalLoading ? "Running..." : "🔄 Run Built-in Benchmark"}
+                    {(evalLoading || evalResults?.running) ? "Running..." : "🔄 Run Built-in Benchmark"}
                   </button>
                 </div>
               </div>
