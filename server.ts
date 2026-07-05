@@ -18,6 +18,9 @@ import {
 import {
   decideClassificationOutcome,
   isCategoryFallback,
+  ALWAYS_VISIBLE_URGENCIES,
+  issuesOnlyOrClause,
+  sweepCategoryOrClause,
 } from "./classification-policy";
 import { disposeUnattachedMessage } from "./admin-message-policy";
 import {
@@ -92,7 +95,11 @@ import {
   isSystemBotMessage,
   parseAdminSenderHashes,
 } from "./message-reconciliation";
-import { findActionableSignals, buildAuditSnippet } from "./dismissed-audit";
+import {
+  findActionableSignals,
+  buildAuditSnippet,
+  urgencyContradictionLabel,
+} from "./dismissed-audit";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -1186,11 +1193,10 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
         .select("id, status, raw_text, first_admin_reply_at, last_message_at, created_at")
         .in("status", ASSUME_RESOLVABLE_STATUSES)
         .eq("is_admin_message", false)
-        .not(
-          "category",
-          "in",
-          '("General Question","Praise","Spam/Irrelevant","Community Chat")',
-        )
+        // Noise categories are excluded UNLESS the classifier itself rated
+        // the ticket High/Critical (urgent-is-never-noise) — such a ticket
+        // is visible in the lane and must be closeable like any real one.
+        .or(sweepCategoryOrClause(Array.from(NON_ESSENTIAL_CATEGORIES)))
         .order("last_message_at", { ascending: true, nullsFirst: true })
         .limit(ASSUME_RESOLVE_SWEEP_LIMIT);
       if (error) {
@@ -1317,15 +1323,12 @@ Remember: You are a Quidax support agent. Be specific to the Nigerian crypto con
           "id, status, raw_text, first_admin_reply_at, last_message_at, created_at",
         )
         // Same eligibility spine as the time sweep: active, non-Escalated,
-        // non-admin, real (non-noise) category. Escalated is excluded by
-        // ASSUME_RESOLVABLE_STATUSES (a human parked it).
+        // non-admin, real category OR AI-rated High/Critical (a noise
+        // category never hides an urgent ticket from the sweeps). Escalated
+        // is excluded by ASSUME_RESOLVABLE_STATUSES (a human parked it).
         .in("status", ASSUME_RESOLVABLE_STATUSES)
         .eq("is_admin_message", false)
-        .not(
-          "category",
-          "in",
-          '("General Question","Praise","Spam/Irrelevant","Community Chat")',
-        )
+        .or(sweepCategoryOrClause(Array.from(NON_ESSENTIAL_CATEGORIES)))
         .order("last_message_at", { ascending: true, nullsFirst: true })
         .limit(500);
       if (error) {
@@ -4148,7 +4151,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       if (req.query.issues_only === "true" && (!req.query.urgency || req.query.urgency === "All")) {
         demo = demo.filter(
           (t) =>
-            !NON_ESSENTIAL_CATEGORIES.has(t.category) && t.urgency !== "Low",
+            (!NON_ESSENTIAL_CATEGORIES.has(t.category) &&
+              t.urgency !== "Low") ||
+            (ALWAYS_VISIBLE_URGENCIES.includes(t.urgency) &&
+              t.status !== "Dismissed"),
         );
       }
       if (req.query.urgency && req.query.urgency !== "All") {
@@ -4224,9 +4230,12 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
           temp = temp.eq("group_id", req.query.group_id);
         }
         if (issuesOnly) {
-          const nonEssStr = Array.from(NON_ESSENTIAL_CATEGORIES).map(c => `"${c}"`).join(",");
+          // Urgent-is-never-noise: the clause also keeps High/Critical
+          // tickets visible regardless of category (non-Dismissed; the
+          // Dismissed Audit covers those). Mirrored in tickets_stats
+          // (migration 023) — keep the two in sync.
           temp = temp.or(
-            `summary.eq."Processing message...",and(category.not.in.(${nonEssStr}),urgency.neq.Low)`,
+            issuesOnlyOrClause(Array.from(NON_ESSENTIAL_CATEGORIES)),
           );
         }
         if (filterStart) temp = temp.gte("created_at", filterStart);
@@ -4806,6 +4815,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         // ("we have refunded you") must never flag a ticket.
         const userText = userThreadText(t.raw_text || "");
         const signals = findActionableSignals(userText);
+        // Urgent-is-never-noise: Dismissed + AI-rated High/Critical is a
+        // self-contradiction worth a human look even with no text signal.
+        const urgencyFlag = urgencyContradictionLabel(t.urgency);
+        if (urgencyFlag) signals.push(urgencyFlag);
         if (signals.length === 0) continue;
         candidates.push({
           id: t.id,

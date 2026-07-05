@@ -3,6 +3,9 @@ import {
   decideClassificationOutcome,
   isCategoryFallback,
   AUTO_DISMISS_CATEGORIES,
+  ALWAYS_VISIBLE_URGENCIES,
+  issuesOnlyOrClause,
+  sweepCategoryOrClause,
 } from "../classification-policy";
 
 const td = (over: Partial<any> = {}) => ({
@@ -165,5 +168,44 @@ describe("decideClassificationOutcome - failed classifications are never dismiss
         flags({ isAdminSender: true }),
       ).status,
     ).toBe("Resolved");
+  });
+});
+
+describe("urgent-is-never-noise read-layer clauses", () => {
+  // The exact-string assertions are load-bearing: a malformed PostgREST
+  // .or() string fails only at runtime (as a silent 400 in a sweep log).
+  const NOISE = [
+    "General Question",
+    "Praise",
+    "Spam/Irrelevant",
+    "Community Chat",
+  ];
+
+  it("the always-visible rule is exactly High and Critical", () => {
+    expect(ALWAYS_VISIBLE_URGENCIES).toEqual(["High", "Critical"]);
+  });
+
+  it("issuesOnlyOrClause keeps the two legacy disjuncts and adds the urgency guard", () => {
+    expect(issuesOnlyOrClause(NOISE)).toBe(
+      'summary.eq."Processing message...",' +
+        'and(category.not.in.("General Question","Praise","Spam/Irrelevant","Community Chat"),urgency.neq.Low),' +
+        "and(urgency.in.(High,Critical),status.neq.Dismissed)",
+    );
+  });
+
+  it("sweepCategoryOrClause lets High/Critical through the noise-category exclusion", () => {
+    expect(sweepCategoryOrClause(NOISE)).toBe(
+      'category.not.in.("General Question","Praise","Spam/Irrelevant","Community Chat"),' +
+        "urgency.in.(High,Critical)",
+    );
+  });
+
+  it("quotes whatever category list it is handed (list stays single-sourced in server.ts)", () => {
+    expect(issuesOnlyOrClause(["A", "B"])).toContain(
+      'category.not.in.("A","B")',
+    );
+    expect(sweepCategoryOrClause(["A"])).toBe(
+      'category.not.in.("A"),urgency.in.(High,Critical)',
+    );
   });
 });

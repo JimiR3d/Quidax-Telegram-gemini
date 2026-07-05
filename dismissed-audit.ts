@@ -19,6 +19,8 @@
 // Pure module, project convention: no I/O, unit-tested in
 // tests/dismissed-audit.test.ts; the thin DB-bound endpoint lives in server.ts.
 
+import { ALWAYS_VISIBLE_URGENCIES } from "./classification-policy";
+
 export interface ActionableSignal {
   // Short human-readable label shown as a badge in the audit modal.
   label: string;
@@ -79,6 +81,19 @@ export function findActionableSignals(text: string): string[] {
   return ACTIONABLE_AUDIT_SIGNALS.filter((s) =>
     s.all.every((re) => re.test(text)),
   ).map((s) => s.label);
+}
+
+// Urgent-is-never-noise (2026-07-03): a Dismissed ticket the classifier
+// itself rated High/Critical is a self-contradiction — it said "urgent" and
+// filed it where nobody looks. Unlike the text signals above this is a
+// column check, so the endpoint merges the label into the ticket's signal
+// list. Same precision bias: the flag repeats the model's own urgency
+// assertion, never a guess of ours.
+export function urgencyContradictionLabel(urgency: unknown): string | null {
+  return typeof urgency === "string" &&
+    ALWAYS_VISIBLE_URGENCIES.includes(urgency)
+    ? `AI-rated ${urgency}`
+    : null;
 }
 
 // Bounded preview of the user's text for the audit list UI.

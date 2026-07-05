@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   findActionableSignals,
   buildAuditSnippet,
+  urgencyContradictionLabel,
   AUDIT_SNIPPET_LEN,
 } from "../dismissed-audit";
 
@@ -79,6 +80,26 @@ describe("findActionableSignals — stays quiet on banter (precision bias)", () 
     expect(findActionableSignals("")).toEqual([]);
     expect(findActionableSignals("   ")).toEqual([]);
     expect(findActionableSignals(null as unknown as string)).toEqual([]);
+  });
+});
+
+describe("urgencyContradictionLabel — urgent-is-never-noise flag", () => {
+  it("flags a Dismissed ticket the AI itself rated High or Critical", () => {
+    expect(urgencyContradictionLabel("High")).toBe("AI-rated High");
+    expect(urgencyContradictionLabel("Critical")).toBe("AI-rated Critical");
+  });
+
+  it("stays quiet for Medium/Low (the normal Dismissed population)", () => {
+    expect(urgencyContradictionLabel("Medium")).toBeNull();
+    expect(urgencyContradictionLabel("Low")).toBeNull();
+  });
+
+  it("handles null, undefined, and non-enum values safely", () => {
+    expect(urgencyContradictionLabel(null)).toBeNull();
+    expect(urgencyContradictionLabel(undefined)).toBeNull();
+    expect(urgencyContradictionLabel(3)).toBeNull();
+    // Exact enum casing only — never invent a flag from a garbage column.
+    expect(urgencyContradictionLabel("high")).toBeNull();
   });
 });
 
