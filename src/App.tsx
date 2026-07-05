@@ -1843,7 +1843,7 @@ export default function App() {
                       {A.agreement ? (
                         <>
                           <p className="text-xs text-white/50 mb-4">
-                            {A.agreement.n} real recent messages, classified by the live model, then judged{" "}
+                            {A.agreement.n} real recent messages, classified by the deployed production classifier, then judged{" "}
                             <span className="text-white/70 font-medium">blind</span> by a human rater. The judge is
                             independent of the AI — so this survives "you graded yourself."
                           </p>
@@ -1874,9 +1874,10 @@ export default function App() {
                         </>
                       ) : (
                         <p className="text-xs text-white/50">
-                          Audit pending — a human rater fills the blind worksheet (real recent messages), then the
-                          agreement and system-safety numbers appear here. This is the number we stand behind; the
-                          sections below are supporting evidence.
+                          Audit pending — the blind worksheets (real recent messages, classified by the deployed
+                          production classifier) are generated and awaiting an independent rating by a Quidax
+                          support agent. Once judged, the agreement and system-safety numbers appear here. This is
+                          the number we stand behind; the sections below are supporting evidence.
                         </p>
                       )}
                     </div>
