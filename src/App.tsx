@@ -1133,10 +1133,10 @@ export default function App() {
         <React.Fragment>
         <main className="max-w-7xl mx-auto px-4 sm:px-6 space-y-6 w-full relative z-10">
 
-          {/* Simulator / Actions */}
+          {/* Data-sync controls (backfill window, manual sync, auto-sync status) */}
           <div className="bg-white/5 border border-white/10 rounded-2xl backdrop-blur-xl p-5 mb-6">
             <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-2">
-              <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Test Integration (Simulation)</h2>
+              <h2 className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Data Controls</h2>
               <div className="flex items-center flex-wrap gap-2">
                 <select value={backfillDays} onChange={e => setBackfillDays(Number(e.target.value))}
                   className="bg-white/5 border border-white/10 rounded px-2 py-1 text-[10px] uppercase font-bold text-white outline-none [&>option]:text-black focus:ring-1 focus:ring-indigo-500"
