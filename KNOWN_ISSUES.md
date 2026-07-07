@@ -2,6 +2,17 @@
 
 This document provides a brutally honest, exhaustive tracking of every bug, suspected bug, untested area, repeated fix, and pending feature in the PulseDesk application.
 
+## 🟢 OBSERVABILITY — ingest-lag gauge (P0-1) + session-liveness alarm (P1-3) (2026-07-07, `observability.ts`, no migration) — closes the "lastMessageReceivedAt looks healthy while dead" trap
+
+Every past live-listener death (Fix 6, Fix 10, Fix 11) was only caught because a human ran `ingested_at - message_timestamp` SQL by hand — `/api/health.lastMessageReceivedAt` is boot-initialized and only advances on real delivery or a watchdog reconnect, so it reads "healthy" for up to 30 minutes after a real failure. That field is UNCHANGED and still has this limitation; it is now supplemented, not replaced.
+
+- **`/api/health.ingestLag`** — `{medianMs, maxMs, sampleSize, computedAt} | null`, refreshed every 60s from the last 50 `messages` rows (cached, so the route itself never queries the DB per request). Live-verified against the real live DB via the no-telegram launcher: `medianMs:8384, maxMs:15188, n:50` (~8.4s median), confirming the channel-diff/AutoFetch pipeline is currently healthy.
+- **`/api/health.telegramDownForMs`** — null when the session is up (or Telegram isn't configured at all, e.g. the no-telegram launcher); otherwise how long it's been continuously down.
+- **Shared alerting mechanism (`evaluateBreach` in `observability.ts`, 18 tests):** both signals must stay breached for a sustained window (5 min for ingest-lag, `SESSION_DOWN_ALERT_MS` — default 10 min — for session-down) before the FIRST alert, then re-alert at most every 30 min while still breached. Alerts always log (`logger.error("Alert", ...)`); `ALERT_WEBHOOK_URL` (optional) also gets a fire-and-forget POST.
+- **Thresholds:** `INGEST_LAG_ALERT_MS` (default 10 min, gates on medianMs) and `SESSION_DOWN_ALERT_MS` (default 10 min) are env-overridable in `.env.example`; the sustained-window and repeat-interval are fixed constants, not exposed as env vars (smaller operator-facing surface).
+- **Not yet exercised: a real sustained breach.** The state-machine tests pin the exact tick-by-tick alerting behavior, and the live curl proves real numbers flow into it, but no actual 10-minute outage has been observed since this shipped — first real trigger (if any) is a genuine incident.
+- **⏭️ NEXT (deferred, later phase per user instruction):** P0-2 (outage-gap recovery) and P1-4 (Groq budget accounting) — escalate to Fable/Opus for those, this phase stayed on Sonnet.
+
 ## 🟢 URGENT-IS-NEVER-NOISE GUARD (2026-07-03, migration `023_urgent_never_noise` applied live) — a High/Critical ticket can no longer be hidden by a noise category
 
 **The find:** live ticket `25f6281d` ("scammed me of 100k", 2026-07-01) sat at **General Question / High** — originally classified Account Access/High (visible), then `reclassifyFromAdminReply` rewrote the CATEGORY only (urgency untouched) and the ticket vanished from the Issues Only lane and the active count. Fresh classifications can't create the combo (`decideClassificationOutcome` forces Low for General Question / Community Chat), but category-only side paths can: admin-reply reclassify, /train category fixes, dashboard urgency bumps, historical rows. Live population at fix time: 7 tickets (2 active, 1 Dismissed, 2 Handed off, 2 Resolved).

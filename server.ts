@@ -96,6 +96,17 @@ import {
   parseAdminSenderHashes,
 } from "./message-reconciliation";
 import {
+  computeLagStats,
+  evaluateBreach,
+  resolveAlertThresholdMs,
+  DEFAULT_INGEST_LAG_ALERT_MS,
+  DEFAULT_SESSION_DOWN_ALERT_MS,
+  INGEST_LAG_SUSTAINED_MS,
+  ALERT_REPEAT_MS,
+  INGEST_LAG_SAMPLE_SIZE,
+  type BreachTracker,
+} from "./observability";
+import {
   findActionableSignals,
   buildAuditSnippet,
   urgencyContradictionLabel,
@@ -2157,6 +2168,40 @@ ${lines.join("\n---\n")}`;
   const targetGroup =
     process.env.TELEGRAM_GROUP_USERNAME || "OfficialQuidaxCommunity";
   let lastMessageReceivedAt = Date.now();
+  // ── Observability (P0-1 ingest-lag gauge + P1-3 session-liveness alarm) ──
+  // Computed by the periodic checkIngestionHealth() sweep below and cached
+  // here so /api/health can stay a synchronous, DB-free read even if a
+  // monitor polls it frequently.
+  let ingestLagSnapshot: {
+    medianMs: number;
+    maxMs: number;
+    sampleSize: number;
+    computedAt: string;
+  } | null = null;
+  const ingestLagTracker: BreachTracker = { firstBreachAt: null, lastAlertAt: null };
+  const sessionDownTracker: BreachTracker = { firstBreachAt: null, lastAlertAt: null };
+  const INGEST_LAG_ALERT_MS = resolveAlertThresholdMs(
+    process.env.INGEST_LAG_ALERT_MS,
+    DEFAULT_INGEST_LAG_ALERT_MS,
+  );
+  const SESSION_DOWN_ALERT_MS = resolveAlertThresholdMs(
+    process.env.SESSION_DOWN_ALERT_MS,
+    DEFAULT_SESSION_DOWN_ALERT_MS,
+  );
+  // Logs loudly always; POSTs to ALERT_WEBHOOK_URL too when configured.
+  // Fire-and-forget with a timeout, like the existing HEARTBEAT_URL ping —
+  // an alert delivery failure must never affect the process it's reporting on.
+  function fireAlert(source: string, message: string) {
+    logger.error("Alert", `[${source}] ${message}`);
+    if (process.env.ALERT_WEBHOOK_URL) {
+      fetch(process.env.ALERT_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source, message, at: new Date().toISOString() }),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => {});
+    }
+  }
   // ── Milestone 5: Automated Status Update Bot ──────────────────────────────
   // When an admin changes a ticket status in the dashboard, post an empathetic
   // reply to the user's original message in the Telegram group. This is the
@@ -4053,6 +4098,77 @@ ${lines.join("\n---\n")}`;
       refreshLearnedKeywords(getSupabase()).catch(() => {});
     } catch {}
   }
+  // ── P0-1 + P1-3: ingestion-lag gauge and session-liveness alarm ──
+  // telegramConfigured gates ONLY the session-down half: the ingest-lag query
+  // is a plain read against `messages` and is meaningful (and locally
+  // verifiable via the no-telegram launcher, which points at the same live
+  // DB) regardless of whether this process holds a Telegram session. The
+  // session-down alarm would be a permanent false positive when Telegram was
+  // never configured to connect in the first place.
+  const telegramConfigured = !!(tlApiId && tlApiHash && tlSession);
+  async function checkIngestionHealth() {
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from("messages")
+        .select("ingested_at, message_timestamp")
+        .order("ingested_at", { ascending: false })
+        .limit(INGEST_LAG_SAMPLE_SIZE);
+      if (error) throw error;
+      const lagsMs = (data || [])
+        .map(
+          (r) =>
+            new Date(r.ingested_at).getTime() -
+            new Date(r.message_timestamp).getTime(),
+        )
+        .filter((n) => Number.isFinite(n) && n >= 0);
+      const stats = computeLagStats(lagsMs);
+      ingestLagSnapshot = stats
+        ? { ...stats, computedAt: new Date().toISOString() }
+        : null;
+      if (stats) {
+        const isBreached = stats.medianMs > INGEST_LAG_ALERT_MS;
+        const { tracker, shouldAlert } = evaluateBreach(
+          isBreached,
+          Date.now(),
+          ingestLagTracker,
+          INGEST_LAG_SUSTAINED_MS,
+          ALERT_REPEAT_MS,
+        );
+        Object.assign(ingestLagTracker, tracker);
+        if (shouldAlert) {
+          fireAlert(
+            "IngestLag",
+            `Median ingest lag ${Math.round(stats.medianMs / 1000)}s exceeds ${Math.round(INGEST_LAG_ALERT_MS / 1000)}s (max ${Math.round(stats.maxMs / 1000)}s, n=${stats.sampleSize})`,
+          );
+        }
+      }
+    } catch (e) {
+      logger.warn("Observability", "Ingest-lag check failed", {
+        error: e.message,
+      });
+    }
+
+    if (telegramConfigured) {
+      const isDown = !(telegramReady && tlClient && (tlClient as any).connected);
+      const { tracker, shouldAlert } = evaluateBreach(
+        isDown,
+        Date.now(),
+        sessionDownTracker,
+        SESSION_DOWN_ALERT_MS,
+        ALERT_REPEAT_MS,
+      );
+      Object.assign(sessionDownTracker, tracker);
+      if (shouldAlert) {
+        fireAlert(
+          "SessionDown",
+          `Telegram session has been down for over ${Math.round(SESSION_DOWN_ALERT_MS / 1000 / 60)} min`,
+        );
+      }
+    }
+  }
+  setTimeout(checkIngestionHealth, 10 * 1e3);
+  setInterval(checkIngestionHealth, 60 * 1e3);
   app.get("/.well-known/security.txt", (_req, res) => {
     res.type("text/plain").send(
       `Contact: mailto:security@quidax.com
@@ -4083,6 +4199,15 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
         (tlClient as any).connected
       ),
       lastMessageReceivedAt: new Date(lastMessageReceivedAt).toISOString(),
+      // P0-1: median/max lag (ingested_at - message_timestamp) over the last
+      // INGEST_LAG_SAMPLE_SIZE messages rows. null until the first sweep
+      // tick (~10s after boot) or if the query itself fails.
+      ingestLag: ingestLagSnapshot,
+      // P1-3: how long the Telegram session has been continuously down, or
+      // null if it's currently up (or Telegram isn't configured at all).
+      telegramDownForMs: sessionDownTracker.firstBreachAt
+        ? Date.now() - sessionDownTracker.firstBreachAt
+        : null,
     });
   });
   app.post("/api/auth/login", authLimiter, (req, res) => {
