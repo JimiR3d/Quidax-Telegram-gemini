@@ -204,6 +204,7 @@ Dashboard status changes (Resolved / Escalated / Awaiting User) can post an empa
 | Outage-gap recovery (P0-2) | **LIVE** (2026-07-08, commit `f28ed79`; startup `reachedCheckpoint` no-op verified in prod) | `GAP_RECOVERY_ENABLED=true`, `GAP_RECOVERY_MAX_MESSAGES=500`, `GAP_RECOVERY_MAX_AGE_HOURS=24` |
 | Groq budget accounting (P1-4) | **LIVE** (2026-07-08, commit `f28ed79`; `/api/health.groqBudget` serving) — metering is read-only; alarm only logs/POSTs | `GROQ_DAILY_REQUEST_CAP=1000`, `GROQ_DAILY_TOKEN_CAP=200000`, `GROQ_BUDGET_ALERT_PCT=0.9` (all at code defaults; env unset on Railway) |
 | Admin-hash allowlist for reconcile | **ARMED** | `ADMIN_SENDER_HASHES=<long-tenured admin hash>` |
+| Bot-sender denylist (grouping tune) | **DORMANT** (2026-07-08, commit `29282df`; content noise-guard active, denylist empty) — arm with the price/welcome bot handles | `TELEGRAM_BOT_USER_IDS`, `TELEGRAM_BOT_USERNAMES` unset |
 | Outbound status bot | **PARKED (kill-switched)** | `BOT_REPLIES_ENABLED=false`, `DRY_RUN=true`; group is broadcast-only |
 | Demo mode | OFF | `DEMO_MODE=false` |
 | Listener debug logger | OFF | `LISTENER_DEBUG=false` |
