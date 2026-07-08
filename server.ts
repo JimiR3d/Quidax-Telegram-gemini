@@ -70,7 +70,8 @@ import {
   parseTopicShiftDecision,
 } from "./topic-shift";
 import { resolveConnectDelayMs } from "./deploy-overlap";
-import { isBanterNoise } from "./noise-prefilter";
+import { isBanterNoise, isNonThreadNoise } from "./noise-prefilter";
+import { buildBotSenderConfig, isBotSender } from "./bot-sender";
 import {
   shouldPreserveHumanUrgency,
   buildGroupedUpdatePayload,
@@ -1058,6 +1059,14 @@ async function startServer() {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  // Grouping precision tune (2026-07-08): denylisted bot accounts (price bot,
+  // welcome bot) are stopped at the source — never an admin, never a ticket,
+  // never an attach. Parsed once here; ships DORMANT (both env vars empty by
+  // default) so isBotSender returns false until an operator arms it on Railway.
+  const BOT_SENDER_CONFIG = buildBotSenderConfig(
+    process.env.TELEGRAM_BOT_USER_IDS,
+    process.env.TELEGRAM_BOT_USERNAMES,
+  );
 let cachedAdminsByGroup = new Map();
 let lastAdminFetchByGroup = new Map();
 
@@ -1065,6 +1074,11 @@ async function checkIsAdmin(groupId, senderId, senderUsername = "") {
   if (!senderId) return false;
   const sId = String(senderId);
   const sUser = senderUsername ? String(senderUsername).replace(/^@/, "").toLowerCase() : "";
+
+  // A denylisted bot is never an admin (belt-and-suspenders for the source drop
+  // in processAndIngestMessage) — even a bot that is a group admin must not be
+  // treated as one, or its output would attach as an [ADMIN_REPLY].
+  if (isBotSender(sId, sUser, BOT_SENDER_CONFIG)) return false;
 
   // If sender is the group itself, it's an anonymous admin
   if (sId === String(groupId) || sId === `-${groupId}` || sId === `-100${groupId}`) return true;
@@ -2629,6 +2643,18 @@ ${lines.join("\n---\n")}`;
       }
       dbMessage = inserted;
     }
+    // Grouping precision tune (2026-07-08): a denylisted bot account is stopped
+    // at the SOURCE — no ticket, no attach, on every ingestion path (they all
+    // funnel through here). The message row is already persisted above, so dedup
+    // holds; we just create nothing. Independent of isAdminSender (these bots are
+    // often group admins). Ships dormant — false while the denylist is empty.
+    if (isBotSender(senderId, senderUsername, BOT_SENDER_CONFIG)) {
+      logger.info(
+        "Ingestion",
+        `Message ${telegramId} from denylisted bot - dropped (no ticket, no attach)`,
+      );
+      return null;
+    }
     const isResolution =
       /\b(thanks|thank you|resolved|fixed|worked|solved|appreciate)\b/i.test(
         text,
@@ -2679,6 +2705,22 @@ ${lines.join("\n---\n")}`;
         "Ingestion",
         `Ignoring general user resolution message with no open ticket (falling through to create normal ticket)`,
       );
+    }
+
+    // Grouping precision tune (2026-07-08): an admin message that is machine bot
+    // output or banter (price-bot ticker dump, welcome/ban template, pasted news)
+    // must never be appended as an [ADMIN_REPLY] block. This runs BEFORE the
+    // quoted + unquoted admin-attach branches below (both of which would weave it
+    // into a matched thread with no noise check). The message row is already
+    // persisted (dedup); we drop it, exactly like disposeUnattachedMessage, just
+    // before the attach attempt. Covers every future bot regardless of the
+    // sender-denylist. Real admin answers never match isNonThreadNoise.
+    if (isAdminSender && isNonThreadNoise(text)) {
+      logger.info(
+        "Ingestion",
+        `Admin message ${telegramId} is bot/banter noise - not appended, dropped`,
+      );
+      return null;
     }
 
     if (replyToMsgId) {
@@ -3107,7 +3149,14 @@ ${lines.join("\n---\n")}`;
     // ticket when nothing matches. senderHash is only shared across a user's
     // messages when a senderId was supplied; without it the hash is per-message
     // and never groups.
-    if (!isAdminSender && senderHash) {
+    //
+    // Grouping precision tune (2026-07-08): a banter user message (a bare
+    // /p BTC price command, a pasted-news dump) must not fold into a real thread.
+    // Skipping the fold here lets it fall through to the new-ticket path, where
+    // isPreFiltered Dismisses it as its own noise ticket instead of polluting an
+    // active ticket's [USER_FOLLOWUP] chain. User side uses isBanterNoise only
+    // (welcome/ban templates are not a user concern).
+    if (!isAdminSender && senderHash && !isBanterNoise(text)) {
       try {
         // Widest groupable cutoff (6h). The single most-recent active ticket in
         // that window is the candidate parent (v1: compare against one ticket).

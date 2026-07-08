@@ -3,6 +3,12 @@
 // Heuristics for banter that should be routed to the noise lane
 // (Dismissed-but-reversible) without calling the LLM.
 //
+// isNonThreadNoise (2026-07-08): a wider combinator used by the APPEND/FOLD paths
+// in processAndIngestMessage (not just new-ticket classification). See its
+// definition at the bottom of this file.
+
+import { isSystemBotMessage } from "./message-reconciliation";
+//
 // Contract (decision #3, 2026-06-19):
 //   - NEVER drop a message — just signals isPreFiltered=true so the caller
 //     skips the LLM and applies category=General Question / Dismissed.
@@ -84,4 +90,17 @@ export function isBanterNoise(text: string): boolean {
   }
 
   return false;
+}
+
+// A message that must NEVER be woven into a real thread as an appended reply/fold
+// (grouping precision tune, 2026-07-08). The admin-reply and grouping-fold paths
+// in processAndIngestMessage run BEFORE the isPreFiltered gate, so machine bot
+// output (price-bot ticker dumps, welcome/ban templates) used to attach as
+// [ADMIN_REPLY]/[USER_FOLLOWUP] blocks unchecked. This composes the two tested
+// recognizers so those appends are dropped instead. Conservative by construction:
+// both isBanterNoise and isSystemBotMessage are AND-gated / template-exact and
+// bias to false, so a real support message / admin answer is never caught.
+export function isNonThreadNoise(text: string): boolean {
+  if (typeof text !== "string" || !text.trim()) return false;
+  return isBanterNoise(text) || isSystemBotMessage(text);
 }

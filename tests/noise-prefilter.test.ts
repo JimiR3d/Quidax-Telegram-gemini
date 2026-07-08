@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isBanterNoise } from "../noise-prefilter";
+import { isBanterNoise, isNonThreadNoise } from "../noise-prefilter";
 
 // ─── 1a: bare price/chart bot commands ───────────────────────────────────────
 describe("1a – bare price/chart bot commands", () => {
@@ -142,4 +142,42 @@ describe("1d – automated price-bot ticker dump", () => {
     expect(
       isBanterNoise("bitcoin market cap is huge now, is it safe to buy on Quidax?"),
     ).toBe(false));
+});
+
+// ─── isNonThreadNoise: the append/fold guard (grouping precision tune) ────────
+// Composes isBanterNoise (price dumps, /p commands, pasted news) with
+// isSystemBotMessage (welcome/ban templates). Used to keep machine/bot content
+// out of a real ticket's [ADMIN_REPLY]/[USER_FOLLOWUP] thread.
+describe("isNonThreadNoise – append/fold guard", () => {
+  // The exact price-bot ticker dump that leaked into the live Saylor ticket
+  // 27ea2751 as an [ADMIN_REPLY] block (isBanterNoise 1d, 6 labels).
+  it("catches the Saylor-ticket CoinMarketCap dump", () =>
+    expect(
+      isNonThreadNoise(
+        "Bitcoin (BTC)\nPrice: $59,727.31 USD\nPrice: 38.05 ETH\n1hr Change: -0.06%\n24hr Change: -0.78%\n7d Change: -8.29%\nVolume: $24,436,936,432.55\nMarket Cap: $1,197,518,624,034.77\nCirculating Supply: 20,049,765.00\nTotal Supply: 20,049,765.00\n\n🚀 View on CoinMarketCap",
+      ),
+    ).toBe(true));
+
+  // The welcome template that leaked into the same ticket (isSystemBotMessage).
+  it("catches the welcome-bot template", () =>
+    expect(
+      isNonThreadNoise(
+        "Hi uc 👋, \nWelcome to the Quidax Official Community! \n\nQuidax.com allows you to buy, sell, transfer, store, and earn crypto.",
+      ),
+    ).toBe(true));
+
+  it("catches a bare /p BTC price command", () =>
+    expect(isNonThreadNoise("/p BTC")).toBe(true));
+
+  // Must NOT catch — a real admin answer / support reply.
+  it("does NOT catch a real admin answer", () =>
+    expect(isNonThreadNoise("Yes, your withdrawal has been processed. Please check now.")).toBe(false));
+
+  it("does NOT catch a real user follow-up", () =>
+    expect(isNonThreadNoise("It's still not showing in my balance, what should I do?")).toBe(false));
+
+  it("does NOT catch an empty / whitespace string", () => {
+    expect(isNonThreadNoise("")).toBe(false);
+    expect(isNonThreadNoise("   ")).toBe(false);
+  });
 });
