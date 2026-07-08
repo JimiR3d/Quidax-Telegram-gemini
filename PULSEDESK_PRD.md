@@ -201,8 +201,8 @@ Dashboard status changes (Resolved / Escalated / Awaiting User) can post an empa
 | Orphan reconciliation sweep | **LIVE, writing** | `INGEST_RECONCILE_ENABLED=true`, `DRY_RUN=false` |
 | 7-day Assumed-Resolved sweep | **LIVE, writing** | `ASSUMED_RESOLVE_ENABLED=true` |
 | D2 conversation-aware resolution | **LIVE, writing** | `RESOLUTION_INFER_ENABLED=true`, `DRY_RUN=false` |
-| Outage-gap recovery (P0-2) | **BUILT, ships DORMANT** (enable in prod after a verified-inert deploy) | `GAP_RECOVERY_ENABLED=false`, `GAP_RECOVERY_MAX_MESSAGES=500`, `GAP_RECOVERY_MAX_AGE_HOURS=24` |
-| Groq budget accounting (P1-4) | **BUILT, ships LIVE** (metering is read-only; alarm only logs/POSTs) | `GROQ_DAILY_REQUEST_CAP=1000`, `GROQ_DAILY_TOKEN_CAP=200000`, `GROQ_BUDGET_ALERT_PCT=0.9` |
+| Outage-gap recovery (P0-2) | **LIVE** (2026-07-08, commit `f28ed79`; startup `reachedCheckpoint` no-op verified in prod) | `GAP_RECOVERY_ENABLED=true`, `GAP_RECOVERY_MAX_MESSAGES=500`, `GAP_RECOVERY_MAX_AGE_HOURS=24` |
+| Groq budget accounting (P1-4) | **LIVE** (2026-07-08, commit `f28ed79`; `/api/health.groqBudget` serving) — metering is read-only; alarm only logs/POSTs | `GROQ_DAILY_REQUEST_CAP=1000`, `GROQ_DAILY_TOKEN_CAP=200000`, `GROQ_BUDGET_ALERT_PCT=0.9` (all at code defaults; env unset on Railway) |
 | Admin-hash allowlist for reconcile | **ARMED** | `ADMIN_SENDER_HASHES=<long-tenured admin hash>` |
 | Outbound status bot | **PARKED (kill-switched)** | `BOT_REPLIES_ENABLED=false`, `DRY_RUN=true`; group is broadcast-only |
 | Demo mode | OFF | `DEMO_MODE=false` |
