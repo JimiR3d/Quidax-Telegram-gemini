@@ -111,6 +111,16 @@ import {
   buildAuditSnippet,
   urgencyContradictionLabel,
 } from "./dismissed-audit";
+import {
+  filterNewerThan,
+  reachedCheckpoint,
+  reachedAgeCutoff,
+  capReached,
+  nextOffsetId,
+  DEFAULT_GAP_RECOVERY_MAX_MESSAGES,
+  DEFAULT_GAP_RECOVERY_MAX_AGE_HOURS,
+  GAP_RECOVERY_PAGE_SIZE,
+} from "./gap-recovery";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -2188,6 +2198,34 @@ ${lines.join("\n---\n")}`;
     process.env.SESSION_DOWN_ALERT_MS,
     DEFAULT_SESSION_DOWN_ALERT_MS,
   );
+  // ── P0-2: outage-gap recovery config + last-run snapshot ──────────────────
+  // The `messages` table IS the durable checkpoint: on startup and after a
+  // watchdog reconnect we page Telegram history from the newest stored
+  // telegram_message_id and replay anything newer through the idempotent
+  // processAndIngestMessage, so an outage longer than AutoFetch's 2h lookback
+  // no longer loses the gap. Ships dormant behind GAP_RECOVERY_ENABLED (like
+  // CHANNEL_DIFF_ENABLED / ASSUMED_RESOLVE_ENABLED) — enable in prod after a
+  // verified-inert deploy. Bounded by a message-count cap and an age cap so a
+  // catastrophic (multi-day) gap can never spin an unbounded backfill.
+  // resolveAlertThresholdMs is the shared guarded positive-number parser
+  // (garbage/negative/zero env → default); the message cap is a count and the
+  // age is in hours, not ms — the name is generic despite its origin.
+  const GAP_RECOVERY_ENABLED = process.env.GAP_RECOVERY_ENABLED === "true";
+  const GAP_RECOVERY_MAX_MESSAGES = resolveAlertThresholdMs(
+    process.env.GAP_RECOVERY_MAX_MESSAGES,
+    DEFAULT_GAP_RECOVERY_MAX_MESSAGES,
+  );
+  const GAP_RECOVERY_MAX_AGE_HOURS = resolveAlertThresholdMs(
+    process.env.GAP_RECOVERY_MAX_AGE_HOURS,
+    DEFAULT_GAP_RECOVERY_MAX_AGE_HOURS,
+  );
+  let lastGapRecovery: {
+    ranAt: string;
+    reason: string;
+    recovered: number;
+    reachedCheckpoint: boolean;
+    capHit: boolean;
+  } | null = null;
   // Logs loudly always; POSTs to ALERT_WEBHOOK_URL too when configured.
   // Fire-and-forget with a timeout, like the existing HEARTBEAT_URL ping —
   // an alert delivery failure must never affect the process it's reporting on.
@@ -3798,7 +3836,208 @@ ${lines.join("\n---\n")}`;
               });
             }
           };
+          // ── P0-2: outage-gap recovery ──────────────────────────────────────
+          // AutoFetch only looks back 2h, so an outage longer than that loses
+          // the gap forever. This backfills it: the newest stored
+          // telegram_message_id is the durable checkpoint; we page Telegram
+          // history newest-first from there and replay anything newer through
+          // the SAME idempotent processAndIngestMessage. Bounded by a message
+          // cap and an age cap. Runs at startup and after each watchdog
+          // reconnect; a re-entrancy flag stops overlapping runs stacking.
+          // Never stamps lastMessageReceivedAt (it is backfill, not live
+          // delivery — like AutoFetch, it must not keep the watchdog asleep).
+          let gapRecoveryRunning = false;
+          const runGapRecovery = async (reason: string) => {
+            if (!GAP_RECOVERY_ENABLED) return;
+            if (gapRecoveryRunning) return;
+            gapRecoveryRunning = true;
+            try {
+              // The checkpoint: the newest telegram id we've already stored.
+              const { data: maxRows, error: maxErr } = await getSupabase()
+                .from("messages")
+                .select("telegram_message_id")
+                .order("telegram_message_id", { ascending: false })
+                .limit(1);
+              if (maxErr) throw maxErr;
+              const storedMaxId = maxRows?.length
+                ? Number(maxRows[0].telegram_message_id)
+                : 0;
+              // No checkpoint (empty DB) → don't pull `cap` messages of history;
+              // let AutoFetch seed the baseline instead.
+              if (!Number.isFinite(storedMaxId) || storedMaxId <= 0) {
+                logger.info(
+                  "GapRecovery",
+                  `No stored checkpoint yet - skipping (${reason})`,
+                );
+                lastGapRecovery = {
+                  ranAt: new Date().toISOString(),
+                  reason,
+                  recovered: 0,
+                  reachedCheckpoint: false,
+                  capHit: false,
+                };
+                return;
+              }
+              const ageCutoff =
+                Math.floor(Date.now() / 1e3) -
+                GAP_RECOVERY_MAX_AGE_HOURS * 60 * 60;
+              // Page newest-first from Telegram, collecting ids > checkpoint,
+              // stopping at the checkpoint, the age boundary, or the count cap.
+              let offsetId = 0; // 0 = newest
+              const collected: any[] = [];
+              let didReachCheckpoint = false;
+              let capHit = false;
+              const maxPages =
+                Math.ceil(GAP_RECOVERY_MAX_MESSAGES / GAP_RECOVERY_PAGE_SIZE) + 2;
+              for (let page = 0; page < maxPages; page++) {
+                const batch = await client.getMessages(targetGroup, {
+                  limit: GAP_RECOVERY_PAGE_SIZE,
+                  offsetId,
+                });
+                collected.push(
+                  ...filterNewerThan(batch as any, storedMaxId, ageCutoff),
+                );
+                // Checkpoint reached (or no more history) → clean stop, no loss.
+                if (reachedCheckpoint(batch as any, storedMaxId)) {
+                  didReachCheckpoint = true;
+                  break;
+                }
+                // Age boundary hit before the checkpoint → older gap is beyond
+                // the recovery window (honest hard limit, logged below).
+                if (reachedAgeCutoff(batch as any, ageCutoff)) {
+                  capHit = true;
+                  break;
+                }
+                if (capReached(collected.length, GAP_RECOVERY_MAX_MESSAGES)) {
+                  capHit = true;
+                  break;
+                }
+                const next = nextOffsetId(batch as any);
+                if (next == null) {
+                  didReachCheckpoint = true;
+                  break;
+                }
+                offsetId = next;
+              }
+              if (collected.length === 0) {
+                lastGapRecovery = {
+                  ranAt: new Date().toISOString(),
+                  reason,
+                  recovered: 0,
+                  reachedCheckpoint: didReachCheckpoint,
+                  capHit,
+                };
+                logger.info(
+                  "GapRecovery",
+                  `Nothing to recover (${reason}) - up to date`,
+                  { storedMaxId },
+                );
+                return;
+              }
+              // Oldest-first so a parent is ingested before its replies; then
+              // one batched pre-dedup so we only pay per genuinely-new message
+              // (AutoFetch may have grabbed some concurrently).
+              const ordered = sortDiffMessagesOldestFirst(collected as any);
+              const ids = sweepCandidateIds(ordered as any, ageCutoff);
+              let already = new Set<string>();
+              if (ids.length) {
+                try {
+                  const { data: existing } = await getSupabase()
+                    .from("messages")
+                    .select("telegram_message_id")
+                    .in("telegram_message_id", ids);
+                  already = new Set(
+                    (existing || []).map((r: any) =>
+                      String(r.telegram_message_id),
+                    ),
+                  );
+                } catch (e) {
+                  logger.warn(
+                    "GapRecovery",
+                    "Pre-dedup lookup failed - processing full set (in-function dedup still applies)",
+                    { error: e.message },
+                  );
+                }
+              }
+              const toProcess = selectMessagesToIngest(
+                ordered as any,
+                already,
+                ageCutoff,
+              ) as any[];
+              logger.warn(
+                "GapRecovery",
+                `Recovering ${toProcess.length} missed message(s) (${reason})`,
+                {
+                  storedMaxId,
+                  collected: collected.length,
+                  reachedCheckpoint: didReachCheckpoint,
+                  capHit,
+                },
+              );
+              let recovered = 0;
+              for (const msg of toProcess) {
+                try {
+                  const id = msg.id;
+                  const replyToMsgId =
+                    msg.replyTo?.replyToMsgId || msg.replyToMsgId;
+                  const senderId = msg.senderId;
+                  const senderUsername = (msg.sender as any)?.username || "";
+                  const admin = await checkIsAdmin(
+                    targetGroup,
+                    senderId,
+                    senderUsername,
+                  );
+                  const deepLink = buildTelegramDeepLink(targetGroup, id);
+                  const result = await processAndIngestMessage(
+                    String(msg.text),
+                    id,
+                    targetGroup,
+                    replyToMsgId,
+                    msg.date,
+                    admin,
+                    deepLink,
+                    false,
+                    String(senderId),
+                    senderUsername,
+                  );
+                  if (result !== null) recovered++;
+                } catch (e) {
+                  logger.warn("GapRecovery", `Skipped message ${msg.id}`, {
+                    error: e.message,
+                  });
+                }
+                await new Promise((r) => setTimeout(r, 2100));
+              }
+              lastGapRecovery = {
+                ranAt: new Date().toISOString(),
+                reason,
+                recovered,
+                reachedCheckpoint: didReachCheckpoint,
+                capHit,
+              };
+              logger.info("GapRecovery", `Recovery complete (${reason})`, {
+                recovered,
+                capHit,
+              });
+              if (capHit && !didReachCheckpoint) {
+                logger.warn(
+                  "GapRecovery",
+                  "Hit the recovery cap before reaching the checkpoint - a gap older than the recovery window is unrecoverable",
+                  { reason },
+                );
+              }
+            } catch (e) {
+              logger.error("GapRecovery", `Recovery failed (${reason})`, {
+                error: e.message,
+              });
+            } finally {
+              gapRecoveryRunning = false;
+            }
+          };
           runAutoFetch();
+          // Kick off a one-time outage-gap backfill on startup (no-op unless
+          // enabled and there's actually a gap beyond AutoFetch's 2h window).
+          runGapRecovery("startup");
           // AutoFetch is the PRIMARY ingestion path: the live NewMessage listener
           // does not deliver this supergroup's messages even after Fix 10 priming
           // (account is a member, priming succeeds, but GramJS 2.26.x never pushes
@@ -3967,6 +4206,12 @@ ${lines.join("\n---\n")}`;
                   // resumes from current state (skips the disconnect-window gap;
                   // AutoFetch's 2h lookback carries it). No-op when disabled.
                   if (CHANNEL_DIFF_ENABLED) await seedChannelPts("reconnect");
+                  // P0-2: a reconnect may follow a long disconnect (outage
+                  // beyond AutoFetch's 2h lookback). Backfill the gap from the
+                  // stored checkpoint. Fire-and-forget: it's re-entrancy-guarded
+                  // and bounded, and must not block the watchdog. No-op when the
+                  // feature is disabled or there's nothing beyond the window.
+                  runGapRecovery("reconnect");
                   // Back the watchdog off to its intended ~30-min cadence after a
                   // reconnect. Only live TARGET-group messages advance this clock
                   // (Fix 6), and live push is currently NOT delivering (Fix 10
@@ -4208,6 +4453,10 @@ Expires: ${new Date(Date.now() + 365 * 24 * 60 * 60 * 1e3).toISOString()}
       telegramDownForMs: sessionDownTracker.firstBreachAt
         ? Date.now() - sessionDownTracker.firstBreachAt
         : null,
+      // P0-2: the last outage-gap recovery run (startup / reconnect). null until
+      // the first run, or if GAP_RECOVERY_ENABLED is off (it never runs). A
+      // healthy up-to-date system reports recovered:0, reachedCheckpoint:true.
+      lastGapRecovery,
     });
   });
   app.post("/api/auth/login", authLimiter, (req, res) => {
