@@ -1154,7 +1154,7 @@ async function checkIsAdmin(groupId, senderId, senderUsername = "") {
         withTimeout(
           (async () => {
             const model = genAI.getGenerativeModel({
-              model: "gemini-2.5-flash",
+              model: "gemini-3.6-flash",
             });
             const safeText = redactPII(sanitizeForPrompt(text));
             const prompt = `You are a professional customer support agent for Quidax, a crypto exchange based in Nigeria.
@@ -3384,7 +3384,7 @@ ${lines.join("\n---\n")}`;
           const safeText = redactPII(sanitizeForPrompt(text));
           const response = await geminiBreaker.call(async () => {
             const model = genAI.getGenerativeModel({
-              model: "gemini-2.5-flash",
+              model: "gemini-3.6-flash",
               // same few-shot block as the Groq attempt (already fetched)
               systemInstruction: GROQ_SYSTEM_PROMPT + fewShot,
             });
