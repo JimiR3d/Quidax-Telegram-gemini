@@ -1288,7 +1288,7 @@ export default function App() {
           </div>
 
           {/* Stats Row */}
-          <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 sm:gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
             <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider text-rose-400 font-semibold truncate" title={getKpiTooltip("Active Issues")}>
@@ -1329,15 +1329,6 @@ export default function App() {
                   + {assumedResolvedCount} assumed
                 </p>
               )}
-            </div>
-            <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
-              <p className="text-xs uppercase tracking-wider text-white/40 mb-2 font-semibold" title={getKpiTooltip("Resolution Rate")}>Resolution Rate</p>
-              <div className="flex items-end justify-between w-full">
-                <span className="text-4xl font-bold">{resolutionRate}%</span>
-                <div className="w-24 h-2 bg-white/10 rounded-full mb-2">
-                  <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${resolutionRate}%` }} />
-                </div>
-              </div>
             </div>
             <div className="bg-white/[0.07] border border-white/10 p-5 sm:p-6 rounded-2xl transform-gpu flex flex-col justify-between">
               <p className="text-xs uppercase tracking-wider text-sky-400 mb-2 font-semibold truncate" title={getKpiTooltip("Median Response Time")}>
